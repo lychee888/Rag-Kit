@@ -20,6 +20,12 @@ about GPU, CUDA version, Python version, or inherited shell environment.
   Affects ALL systems (whole block parsed regardless of GPU branch). Reproduced with a
   minimal 6-line repro; escaping as `^(…)` fixes it.
 - **Fix applied:** escape all 6 spots with `^(` `)`.
+- **MORE of the same class found during the full clean re-install:**
+  - `download-models.bat:34` `set /p "…（hf-mirror.com）…”` inside an if-block → crash when
+    the script was finally exercised (this .bat had never run on Windows before). FIXED.
+  - `download-models.bat` wrote its Python via a giant `( echo … ) > file` block full of
+    parentheses — inherently fragile on cmd. REWRITTEN to call a real file
+    `scripts/_download_models.py`. FIXED (downloads succeeded).
 - **Proof:** Z2 (minimal repro): fail → Z2f (escaped): pass. Real install proceeded past Step 4 after fix.
 - **Verify:** re-run Windows install.
 
