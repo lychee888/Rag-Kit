@@ -55,7 +55,7 @@ def setup_autostart(
 
     Windows:
         Creates a scheduled task via ``schtasks`` that runs on user logon.
-        Task: ``rag-kit-watcher`` — runs ``rag watch --interval <N>``.
+        Task: ``rag-kit-watcher`` — runs ``rag watch <watch_folder>``.
 
     Linux:
         Creates a systemd user service at
@@ -63,7 +63,8 @@ def setup_autostart(
         with ``loginctl enable-linger``.
 
     Args:
-        interval:   Polling interval in seconds (passed to ``rag watch``).
+        interval:   Reserved (kept for backward compat). The watch command
+                    is state-change based (watchdog) and needs no poll interval.
         task_name:  Name of the task/service.
 
     Returns:
@@ -72,9 +73,9 @@ def setup_autostart(
     system = platform.system()
 
     if system == "Windows":
-        return _setup_windows(task_name, interval)
+        return _setup_windows(task_name)
     elif system == "Linux":
-        return _setup_linux(task_name, interval)
+        return _setup_linux(task_name)
     else:
         return False, f"Autostart not supported on {system}"
 
@@ -175,7 +176,7 @@ def remove_autostart(task_name: str = "rag-kit-watcher") -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _setup_windows(task_name: str, interval: int) -> tuple[bool, str]:
+def _setup_windows(task_name: str) -> tuple[bool, str]:
     """Create a Windows scheduled task for the watcher."""
 
     rag_exe = _find_rag_exe()
@@ -185,10 +186,8 @@ def _setup_windows(task_name: str, interval: int) -> tuple[bool, str]:
             "Could not find rag.exe. Ensure rag-kit is installed in a venv.",
         )
 
-    # If rag_exe has spaces in the path (common on Windows), quote it.
-    # The /TR argument to schtasks can be finicky with quotes — use
-    # the full command as the argument.
-    command = f'"{rag_exe}" watch --interval {interval}'
+    # Run the state-change watcher on the configured watch folder.
+    command = f'"{rag_exe}" watch'
 
     try:
         # First, delete any existing task with the same name.
@@ -241,7 +240,7 @@ def _setup_windows(task_name: str, interval: int) -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _setup_linux(task_name: str, interval: int) -> tuple[bool, str]:
+def _setup_linux(task_name: str) -> tuple[bool, str]:
     """Create a systemd user service for the watcher."""
 
     rag_exe = _find_rag_exe()
@@ -264,7 +263,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={rag_exe} watch --interval {interval}
+ExecStart={rag_exe} watch
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
@@ -277,8 +276,9 @@ WantedBy=default.target
         service_file.write_text(service_content)
 
         # Enable linger so the user service starts at boot (even before login).
+        import getpass
         subprocess.run(
-            ["loginctl", "enable-linger", "$USER"],
+            ["loginctl", "enable-linger", getpass.getuser()],
             capture_output=True,
             timeout=10,
         )

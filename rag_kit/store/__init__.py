@@ -22,8 +22,9 @@ import pyarrow as pa
 # Schema definition
 # --------------------------------------------------------------------------- #
 
-# Fixed embedding dimension for paraphrase-multilingual-MiniLM-L12-v2.
-# Other models may differ; the table is created with this dimension.
+# Default embedding dimension for paraphrase-multilingual-MiniLM-L12-v2
+# (used only when no vectors have been written yet; the real dim is taken
+# from the first ``add_chunks`` call so any embedding model works).
 _DEFAULT_DIM = 384
 
 _TABLE_NAME = "documents"
@@ -244,6 +245,99 @@ class VectorStore:
             top_k=top_k,
             filter_sql=f"source = '{safe_source}'",
         )
+
+    _fts_ready = False
+    _fts_rows = -1
+
+    def _ensure_fts(self) -> None:
+        """Create (or refresh) the full-text-search index on the text column.
+
+        The index is rebuilt whenever new rows are added, otherwise newly
+        ingested documents would be missing from keyword search.
+        """
+        count = self.count_rows()
+        if count == 0:
+            self._fts_ready = False
+            return
+        if self._fts_ready and self._fts_rows == count:
+            return
+        table = self._get_table()
+        try:
+            try:
+                from lancedb.index import FTS
+                table.create_index(column="text", config=FTS(), replace=True)
+            except Exception:
+                table.create_fts_index("text", replace=True)
+            self._fts_ready = True
+            self._fts_rows = count
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Could not create FTS index: %s", exc)
+
+    def search_hybrid(
+        self,
+        query_text: str,
+        query_vector: np.ndarray,
+        top_k: int = 5,
+        alpha: float = 0.5,
+        filter_sql: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Hybrid vector + keyword search with Reciprocal Rank Fusion.
+
+        Combines dense vector search (semantic) with full-text keyword
+        search so exact terms that dense embeddings miss are still found.
+        ``alpha`` is the weight on the semantic side (1.0 = vector-only,
+        0.0 = keyword-only); default 0.5 blends both.
+
+        Returns the same result shape as :meth:`search`.
+        """
+        self._ensure_fts()
+        table = self._get_table()
+
+        query_vec = np.asarray(query_vector, dtype=np.float32).tolist()
+        alpha = min(max(alpha, 0.0), 1.0)
+
+        # vector-only shortcut
+        if alpha >= 1.0:
+            return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
+        # keyword-only shortcut (FTS raw = relevance as score)
+        if alpha <= 0.0:
+            q = table.search(query_text, query_type="fts").limit(top_k)
+            if filter_sql:
+                q = q.where(filter_sql)
+            rows = q.to_list()
+            for row in rows:
+                row["score"] = round(row.get("score", row.get("_score", 0.0)), 4)
+            return rows
+
+        try:
+            from lancedb.rerankers import RRFReranker
+        except Exception:
+            return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
+
+        try:
+            q = (
+                table.search(query_type="hybrid")
+                .vector(query_vec)
+                .text(query_text)
+                .rerank(reranker=RRFReranker())
+                .limit(top_k)
+            )
+            if filter_sql:
+                q = q.where(filter_sql)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Hybrid search failed (%s); falling back to vector search.", exc
+            )
+            return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
+
+        rows = q.to_list()
+        for row in rows:
+            score = row.get("_relevance_score", row.get("score", 0.0))
+            row["score"] = round(float(score), 4)
+            row.pop("_relevance_score", None)
+        return rows
 
     # -- public API: delete ------------------------------------------------- #
 

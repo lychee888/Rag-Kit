@@ -1,6 +1,6 @@
 # rag-kit
 
-Agentic RAG system for Hermes Agent. Watches a folder, auto-ingests documents (PDF, DOCX, TXT, MD), embed with multilingual sentence-transformers, store in LanceDB, and query via a CLI designed for LLM agents.
+Agentic RAG system for Hermes Agent. Watches a folder, auto-ingests documents (PDF, DOCX, XLSX, PPTX, TXT, MD, and images via OCR), embeds with a multilingual sentence-transformers model, stores in LanceDB, and answers via a CLI designed for LLM agents.
 
 ## Quickstart (one-liner per platform)
 
@@ -98,11 +98,11 @@ export RAG_KIT_HF_ENDPOINT=https://hf-mirror.com   # China mirror
 | `embedding_model` | str | `paraphrase-multilingual-MiniLM-L12-v2` | Sentence-transformers model |
 | `vlm_model` | str | `HuggingFaceTB/SmolVLM-256M-Instruct` | VLM model for captions |
 | `vlm_enabled` | bool | `true` | Enable VLM captioning |
-| `supported_extensions` | list | `[.pdf, .docx, .txt, .md]` | File types to ingest |
+| `supported_extensions` | list | `[.pdf, .docx, .xlsx, .pptx, .txt, .md, .png, .jpg, .jpeg, .tiff, .webp]` | File types to ingest |
 | `languages` | list | `[zh, en]` | OCR languages |
 | `chunk_size` | int | `512` | Target chunk length (chars) |
 | `chunk_overlap` | int | `64` | Overlap between chunks |
-| `watch_interval` | int | `30` | Polling interval (seconds) |
+| `watch_interval` | int | `30` | Reserved. Watcher is state-change based (watchdog) — needs no poll interval |
 | `search_alpha` | float | `0.5` | Semantic vs keyword blend |
 | `max_memory_mb` | int | `2048` | Memory budget guard |
 | `hf_endpoint` | str | `""` | HF endpoint (set for China) |

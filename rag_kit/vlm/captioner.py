@@ -173,20 +173,9 @@ def _load_vlm_onnx(
 
     processor = AutoProcessor.from_pretrained(load_path)
 
-    # Try to load ONNX model
-    try:
-        from transformers import AutoModelForImageTextToText
-        # Some models support ONNX loading directly
-        model = AutoModelForImageTextToText.from_pretrained(
-            load_path,
-            provider="CPUExecutionProvider",
-        )
-        logger.info("VLM loaded via ONNX runtime")
-        return model, processor
-    except Exception as e:
-        logger.debug("ONNX direct loading failed: %s", e)
-
-    # Try Optimum's ORTModel for vision
+    # Try to load ONNX model — via Optimum's ORTModel (the transformer-native
+    # AutoModelForImageTextToText class takes no ``provider`` kwarg, so it is
+    # only usable for PyTorch; ONNX requires optimum).
     try:
         from optimum.onnxruntime import ORTModelForImageTextToText
         model = ORTModelForImageTextToText.from_pretrained(

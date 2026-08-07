@@ -32,7 +32,7 @@ from rag_kit.ingest.ocr import is_ocr_available, ocr_image
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".md")
+SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp")
 
 # Minimum characters per page to consider text extraction successful.
 # If a PDF page yields fewer characters than this, it is treated as a
@@ -118,6 +118,7 @@ def ingest_file(
             all_chunks.append(
                 {
                     "id": chunk.chunk_id,
+                    "source": str(path),
                     "source_file": source_file,
                     "page": page.page_num,
                     "section": page.section,
@@ -224,7 +225,7 @@ def ingest_folder(
 
     all_chunks: list[dict[str, Any]] = []
 
-    for entry in sorted(folder.iterdir()):
+    for entry in sorted(folder.rglob("*")):
         if entry.is_file() and entry.suffix.lower() in SUPPORTED_EXTENSIONS:
             try:
                 chunks = ingest_file(
@@ -306,6 +307,12 @@ def _extract_pages(
         return _extract_pdf(path, languages, use_ocr, use_vlm)
     elif ext == ".docx":
         return _extract_docx(path)
+    elif ext == ".xlsx":
+        return _extract_xlsx(path)
+    elif ext == ".pptx":
+        return _extract_pptx(path)
+    elif ext in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
+        return _extract_image(path, languages)
     elif ext in (".txt", ".md"):
         return _extract_text_file(path, ext)
     else:
@@ -467,6 +474,137 @@ def _extract_docx(path: Path) -> list[_Page]:
             section=current_section,
             extraction_method="text",
         )
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# XLSX extraction (openpyxl)
+# --------------------------------------------------------------------------- #
+
+
+def _extract_xlsx(path: Path) -> list[_Page]:
+    """Extract text from an .xlsx workbook using openpyxl.
+
+    Every non-empty cell in every non-hidden sheet is extracted as a
+    tab-separated row (sheet name, row index, column label).
+    """
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        logger.warning("openpyxl not available — cannot read .xlsx files")
+        return []
+
+    parts: list[str] = []
+    try:
+        wb = load_workbook(str(path), read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                if ws.sheet_state in ("hidden", "veryHidden"):
+                    continue
+                parts.append(f"[Sheet: {ws.title}]")
+                for row in ws.iter_rows():
+                    cells = []
+                    for cell in row:
+                        val = cell.value
+                        if val is None:
+                            continue
+                        if isinstance(val, float) and val.is_integer():
+                            val = int(val)
+                        col = get_column_letter(cell.column)
+                        cells.append(f"{col}{cell.row}: {val}")
+                    if cells:
+                        parts.append(" ".join(cells))
+        finally:
+            wb.close()
+    except Exception as exc:
+        logger.warning("Failed to read xlsx %s: %s", path, exc)
+        return []
+
+    full_text = _normalize_text("\n".join(parts))
+    if not full_text.strip():
+        return []
+    return [
+        _Page(text=full_text, page_num=1, section="", extraction_method="text")
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# PPTX extraction (python-pptx)
+# --------------------------------------------------------------------------- #
+
+
+def _extract_pptx(path: Path) -> list[_Page]:
+    """Extract text from a .pptx deck using python-pptx.
+
+    Each slide becomes one page (slide number), extracting text from all
+    shapes (text frames, tables) and notes where present.
+    """
+    try:
+        from pptx import Presentation
+    except ImportError:
+        logger.warning("python-pptx not available — cannot read .pptx files")
+        return []
+
+    pages: list[_Page] = []
+    try:
+        prs = Presentation(str(path))
+        for idx, slide in enumerate(prs.slides, start=1):
+            parts: list[str] = []
+            for shape in slide.shapes:
+                text = ""
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        t = "".join(run.text for run in para.runs).strip()
+                        if t:
+                            text += t + "\n"
+                elif shape.has_table:
+                    for row in shape.table.rows:
+                        row_text = "\t".join(cell.text.strip() for cell in row.cells)
+                        if row_text.strip():
+                            text += row_text + "\n"
+                if text.strip():
+                    parts.append(text.strip())
+            # Slide notes
+            if slide.has_notes_slide:
+                notes = slide.notes_slide.notes_text_frame.text.strip()
+                if notes:
+                    parts.append(f"[Notes] {notes}")
+            full_text = _normalize_text("\n".join(parts))
+            if full_text.strip():
+                pages.append(
+                    _Page(text=full_text, page_num=idx, section="", extraction_method="text")
+                )
+    except Exception as exc:
+        logger.warning("Failed to read pptx %s: %s", path, exc)
+        return []
+
+    return pages
+
+
+# --------------------------------------------------------------------------- #
+# Image extraction (OCR)
+# --------------------------------------------------------------------------- #
+
+
+def _extract_image(path: Path, languages: list[str]) -> list[_Page]:
+    """Extract text from a raster image file via OCR."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+
+    image = Image.open(str(path))
+    try:
+        img = image.convert("RGB")
+    finally:
+        image.close()
+
+    text = ocr_image(img, languages=languages)
+    if not text.strip():
+        return []
+    return [
+        _Page(text=_normalize_text(text), page_num=0, section="", extraction_method="ocr")
     ]
 
 

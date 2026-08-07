@@ -193,6 +193,31 @@ def chunk_text(
 # --------------------------------------------------------------------------- #
 
 
+def _model_is_cached(model_name: str, cache_dir: str) -> bool:
+    """Return True if *model_name* is already downloaded into *cache_dir*.
+
+    Checks both the flat folder (``cache_dir/<name>``) and the standard
+    HuggingFace hub layout (``cache_dir/models--org--name/snapshots/...``).
+    This decides whether we may enable offline mode.
+    """
+    from pathlib import Path
+
+    base = Path(cache_dir)
+    # 1. Flat directory: cache_dir/model_name with config.json (or safetensors)
+    flat = base / model_name
+    if (flat / "model.safetensors").exists() or (flat / "pytorch_model.bin").exists() \
+            or (flat / "config.json").exists():
+        return True
+    # 2. HF hub layout: cache_dir/models--org--name/snapshots/<sha>/config.json
+    org, _, name = model_name.partition("/")
+    hub = base / f"models--{org}--{name}" / "snapshots"
+    if hub.exists():
+        for snapshot in hub.iterdir():
+            if (snapshot / "config.json").exists():  # coarse; weights may still be partial
+                return True
+    return False
+
+
 class EmbeddingEngine:
     """Lazy-loaded sentence-transformers embedding model.
 
@@ -236,9 +261,10 @@ class EmbeddingEngine:
         if self.model_dir:
             os.makedirs(self.model_dir, exist_ok=True)
             cache_kwargs["cache_folder"] = self.model_dir
-            # If the model is already cached locally, use offline mode to
-            # avoid network calls (especially when huggingface.co is blocked).
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            # Go offline ONLY if the model is already present in the cache dir.
+            # Otherwise we stay online so the model can download on first run.
+            if _model_is_cached(self.model_name, self.model_dir):
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
         try:
             from sentence_transformers import SentenceTransformer

@@ -210,7 +210,7 @@ def scan_and_ingest(once: bool = False) -> dict[str, Any]:
                 store_chunks.append({
                     "id": c.get("id", c.get("chunk_id", "")),
                     "text": c["text"],
-                    "source": c.get("source_file", c.get("source", "")),
+                    "source": c.get("source", c.get("source_file", "")),
                     "page": int(c.get("page", 0)),
                     "chunk_idx": int(c.get("chunk_idx", i)),
                     "vlm_generated": bool(c.get("vlm_generated", False)),

@@ -2,13 +2,17 @@
 setlocal enabledelayedexpansion
 title rag-kit Model Downloader (Windows)
 
+REM ============================================================
+REM   rag-kit - Model Downloader (Windows)
+REM   Pre-downloads pinned models for fully offline rag-kit use.
+REM   Prefers pinned GitHub Release tarballs (with integrity
+REM   checks); falls back to the HuggingFace hub if unavailable.
+REM ============================================================
+echo.
 echo ============================================================
 echo   rag-kit - Model Downloader
-echo   Downloads all models for offline use
+echo   Prefers pinned GitHub Release tarballs (fast, version-locked)
 echo ============================================================
-echo.
-echo This script pre-downloads models to %%USERPROFILE%%\models\
-echo so rag-kit can work fully offline after installation.
 echo.
 set "MODEL_DIR=%USERPROFILE%\models"
 
@@ -21,25 +25,15 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-REM Check if huggingface_hub is installed; if not, install it
-python -c "import huggingface_hub" 2>nul
-if %ERRORLEVEL% NEQ 0 (
-    echo Installing huggingface_hub...
-    python -m pip install huggingface_hub --quiet
-    if !ERRORLEVEL! NEQ 0 (
-        echo ERROR: Failed to install huggingface_hub.
-        pause
-        exit /b 1
-    )
-)
-
-REM Optionally set China mirror
+REM Optionally set China mirror (for HuggingFace fallback below)
 set "HF_MIRROR="
-set /p HF_CHOICE="Use China mirror (hf-mirror.com)? [y/N]: "
-if /i "!HF_CHOICE!"=="y" (
-    set "HF_ENDPOINT=https://hf-mirror.com"
-    echo Using mirror: !HF_ENDPOINT!
-    echo.
+if not defined RAG_KIT_BATCH (
+    set /p HF_CHOICE="Use China mirror (hf-mirror.com) for HF fallback? [y/N]: "
+    if /i "!HF_CHOICE!"=="y" (
+        set "HF_ENDPOINT=https://hf-mirror.com"
+        echo Using mirror: !HF_ENDPOINT!
+        echo.
+    )
 )
 
 if not exist "%MODEL_DIR%" mkdir "%MODEL_DIR%"
@@ -50,11 +44,16 @@ echo   1. paraphrase-multilingual-MiniLM-L12-v2 (embedding, ~470 MB)
 echo   2. EasyOCR ch_sim + en (OCR, ~100 MB download)
 echo   3. SmolVLM-256M-Instruct (VLM, ~500 MB) - optional
 echo.
-set /p DOWNLOAD_VLM="Download SmolVLM? [Y/n]: "
-if /i "!DOWNLOAD_VLM!"=="n" (
-    set "SKIP_VLM=1"
+REM Only prompt if the caller didn't already specify (e.g. via installer).
+if not defined SKIP_VLM (
+    set /p DOWNLOAD_VLM="Download SmolVLM? [Y/n]: "
+    if /i "!DOWNLOAD_VLM!"=="n" (
+        set "SKIP_VLM=1"
+    ) else (
+        set "SKIP_VLM=0"
+    )
 ) else (
-    set "SKIP_VLM=0"
+    echo   VLM choice inherited from environment (SKIP_VLM=!SKIP_VLM!)
 )
 
 echo.
@@ -65,9 +64,8 @@ echo.
 REM ---- Python download script ----
 set "SCRIPT=%TEMP%\rag_kit_download.py"
 (
-echo import os, sys
+echo import os, sys, tarfile, urllib.request
 echo from pathlib import Path
-echo from huggingface_hub import snapshot_download, hf_hub_download
 echo.
 echo model_dir = os.environ.get("MODEL_DIR", os.path.expanduser("~/models"))
 echo mirror = os.environ.get("HF_ENDPOINT", "")
@@ -78,62 +76,136 @@ echo.
 echo success = []
 echo failed = []
 echo.
-echo # 1. Embedding model
-echo print("\n[1/3] Downloading embedding model: paraphrase-multilingual-MiniLM-L12-v2")
-echo print("  (~470 MB, 117M params, 50+ languages)")
-echo try:
-echo     snapshot_download(
-echo         "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-echo         cache_dir=model_dir,
-echo         resume_download=True,
-echo     )
-echo     print("  OK")
-echo     success.append("embedding")
-echo except Exception as e:
-echo     print(f"  FAILED: {e}")
-echo     failed.append("embedding")
+echo RELEASE_TAG = "v0.1.0"
+echo RELEASE_BASE = f"https://github.com/jarvis959/Rag-Kit/releases/download/{RELEASE_TAG}"
 echo.
-echo # 2. EasyOCR models (Chinese + English)
-echo print("\n[2/3] Downloading EasyOCR models: ch_sim + en")
-echo print("  (~100 MB download, needed for scanned PDFs)")
+echo MIN_SIZES = {
+echo     "embedding-model.tar.gz": 400_000_000,
+echo     "easyocr-models.tar.gz": 80_000_000,
+echo     "smolvlm-model.tar.gz": 250_000_000,
+echo }
+echo.
+echo def fetch_verify(url, dest, min_bytes, label):
+echo     """Download with size check + gzip integrity check."""
+echo     tmp = dest.with_suffix(".part")
+echo     tmp.parent.mkdir(parents=True, exist_ok=True)
+echo     print(f"  [*] Fetching {label} ...")
+echo     try:
+echo         urllib.request.urlretrieve(url, tmp)
+echo     except Exception as e:
+echo         print(f"  FAILED: {e}")
+echo         try: tmp.unlink()
+echo         except OSError: pass
+echo         return False
+echo     if tmp.stat().st_size < min_bytes:
+echo         print(f"  FAILED: {label} too small ({tmp.stat().st_size} bytes)")
+echo         try: tmp.unlink()
+echo         except OSError: pass
+echo         return False
+echo     try:
+echo         with tarfile.open(tmp, "r:gz") as tf:
+echo             tf.getmembers()
+echo     except Exception as e:
+echo         print(f"  FAILED: {label} archive corrupt: {e}")
+echo         try: tmp.unlink()
+echo         except OSError: pass
+echo         return False
+echo     with tarfile.open(tmp, "r:gz") as tf:
+echo         tf.extractall(dest)
+echo     try: tmp.unlink()
+echo     except OSError: pass
+echo     print("  OK")
+echo     return True
+echo.
 echo try:
 echo     import easyocr
-echo     reader = easyocr.Reader(["ch_sim", "en"], gpu=False, download_enabled=True,
-echo                             model_storage_directory=os.path.join(model_dir, "easyocr"))
-echo     print("  OK")
+echo     easyocr_ok = True
+echo except Exception:
+echo     easyocr_ok = False
+echo.
+echo # 1. Embedding model
+echo print("\n[1/3] Embedding model: paraphrase-multilingual-MiniLM-L12-v2")
+echo embed_dir = Path(model_dir) / "models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2" / "snapshots" / "e8f8c211226b894fcb81acc59f3b34ba3efd5f42"
+echo if (embed_dir / "model.safetensors").exists():
+echo     print("  already present")
+echo     success.append("embedding")
+echo else:
+echo     ok = fetch_verify(f"{RELEASE_BASE}/embedding-model.tar.gz", embed_dir, MIN_SIZES["embedding-model.tar.gz"], "embedding model")
+echo     if not ok:
+echo         try:
+echo             from huggingface_hub import snapshot_download
+echo             print("  Falling back to HuggingFace hub...")
+echo             snapshot_download(
+echo                 "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+echo                 cache_dir=model_dir, resume_download=True,
+echo             )
+echo             print("  OK (hub)")
+echo             success.append("embedding")
+echo         except Exception as e:
+echo             print(f"  FAILED: {e}")
+echo             failed.append("embedding")
+echo     else:
+echo         success.append("embedding")
+echo.
+echo # 2. EasyOCR
+echo print("\n[2/3] EasyOCR models: ch_sim + en")
+echo easy_dir = Path.home() / ".EasyOCR" / "model"
+echo if (easy_dir / "zh_sim_g2.pth").exists():
+echo     print("  already present")
 echo     success.append("ocr")
-echo except Exception as e:
-echo     print(f"  FAILED: {e}")
-echo     failed.append("ocr")
+echo else:
+echo     ok = fetch_verify(f"{RELEASE_BASE}/easyocr-models.tar.gz", easy_dir, MIN_SIZES["easyocr-models.tar.gz"], "easyocr models")
+echo     if not ok and easyocr_ok:
+echo         try:
+echo             import easyocr
+echo             print("  Falling back to EasyOCR CDN...")
+echo             easyocr.Reader(["ch_sim", "en"], gpu=False, download_enabled=True,
+echo                             model_storage_directory=str(easy_dir))
+echo             print("  OK (cdn)")
+echo             success.append("ocr")
+echo         except Exception as e:
+echo             print(f"  FAILED: {e}")
+echo             failed.append("ocr")
+echo     elif ok:
+echo         success.append("ocr")
+echo     else:
+echo         failed.append("ocr")
 echo.
 echo # 3. SmolVLM (optional)
 echo skip_vlm = os.environ.get("SKIP_VLM", "0")
 echo if skip_vlm != "1":
-echo     print("\n[3/3] Downloading VLM model: SmolVLM-256M-Instruct")
-echo     print("  (~500 MB, for chart/diagram captioning)")
-echo     try:
-echo         snapshot_download(
-echo             "HuggingFaceTB/SmolVLM-256M-Instruct",
-echo             cache_dir=model_dir,
-echo             resume_download=True,
-echo         )
-echo         print("  OK")
+echo     print("\n[3/3] VLM model: SmolVLM-256M-Instruct")
+echo     vlm_dir = Path(model_dir) / "models--HuggingFaceTB--SmolVLM-256M-Instruct" / "snapshots" / "manual"
+echo     if (vlm_dir / "model.safetensors").exists():
+echo         print("  already present")
 echo         success.append("vlm")
-echo     except Exception as e:
-echo         print(f"  FAILED: {e}")
-echo         print("  (VLM is optional — rag-kit works without it)")
-echo         failed.append("vlm")
+echo     else:
+echo         ok = fetch_verify(f"{RELEASE_BASE}/smolvlm-model.tar.gz", vlm_dir, MIN_SIZES["smolvlm-model.tar.gz"], "SmolVLM")
+echo         if not ok:
+echo             try:
+echo                 from huggingface_hub import snapshot_download
+echo                 print("  Falling back to HuggingFace hub...")
+echo                 snapshot_download(
+echo                     "HuggingFaceTB/SmolVLM-256M-Instruct",
+echo                     cache_dir=model_dir, resume_download=True,
+echo                 )
+echo                 print("  OK (hub)")
+echo                 success.append("vlm")
+echo             except Exception as e:
+echo                 print(f"  FAILED: {e}")
+echo                 print("  (VLM is optional — rag-kit works without it)")
+echo                 failed.append("vlm")
+echo         else:
+echo             success.append("vlm")
 echo else:
 echo     print("\n[3/3] Skipping VLM (user chose not to download)")
 echo.
-echo # Summary
 echo print(f"\n{'='*60}")
 echo print(f"  Download summary:")
 echo print(f"    Succeeded: {', '.join(success) if success else 'none'}")
 echo print(f"    Failed:    {', '.join(failed) if failed else 'none'}")
 echo print(f"  Models cached in: {model_dir}")
 echo print(f"{'='*60}")
-echo.
 echo if failed and not success:
 echo     sys.exit(1)
 echo elif failed:
@@ -164,5 +236,9 @@ echo Models cached in: %MODEL_DIR%
 echo You can now install rag-kit offline:
 echo   scripts\install-windows.bat
 echo.
+REM Pause only when run interactively (not when called from the installer).
+if defined RAG_KIT_BATCH (
+    exit /b 0
+)
 pause
 exit /b 0

@@ -138,6 +138,7 @@ def extract_images_from_pdf(
             continue
 
         # ── Render the page to PNG for VLM captioning ───────────────
+        page_rendered = False
         if area_ratio <= max_area_ratio or max_area_ratio >= 1.0:
             try:
                 pix = page.get_pixmap(dpi=render_dpi)
@@ -154,39 +155,42 @@ def extract_images_from_pdf(
                         "detection": "raster" if images else "vector",
                     },
                 ))
+                page_rendered = True
             except Exception as e:
                 logger.warning("Failed to render page %d: %s", page_num + 1, e)
 
-        # Also extract large standalone images individually
-        for xref, rects in image_rects_by_xref.items():
-            if xref in seen_xrefs:
-                continue
-            for r in rects:
-                if r and r.width > 0 and r.height > 0:
-                    img_area = r.width * r.height
-                    # Only extract standalone if it covers >10% of the page
-                    if img_area / page_area > 0.10:
-                        try:
-                            extracted = doc.extract_image(xref)
-                            if extracted and "image" in extracted:
-                                regions.append(ImageRegion(
-                                    image_bytes=extracted["image"],
-                                    page_num=page_num,
-                                    source_type="embedded_image",
-                                    width=extracted.get("width", 0),
-                                    height=extracted.get("height", 0),
-                                    metadata={
-                                        "xref": xref,
-                                        "ext": extracted.get("ext", ""),
-                                    },
-                                ))
-                                seen_xrefs.add(xref)
-                                break  # One extraction per xref
-                        except Exception as e:
-                            logger.debug(
-                                "Could not extract image xref %d on page %d: %s",
-                                xref, page_num + 1, e,
-                            )
+        # Only also extract standalone images if the whole page was NOT
+        # rendered — otherwise we'd caption the same content twice.
+        if not page_rendered:
+            for xref, rects in image_rects_by_xref.items():
+                if xref in seen_xrefs:
+                    continue
+                for r in rects:
+                    if r and r.width > 0 and r.height > 0:
+                        img_area = r.width * r.height
+                        # Only extract standalone if it covers >10% of the page
+                        if img_area / page_area > 0.10:
+                            try:
+                                extracted = doc.extract_image(xref)
+                                if extracted and "image" in extracted:
+                                    regions.append(ImageRegion(
+                                        image_bytes=extracted["image"],
+                                        page_num=page_num,
+                                        source_type="embedded_image",
+                                        width=extracted.get("width", 0),
+                                        height=extracted.get("height", 0),
+                                        metadata={
+                                            "xref": xref,
+                                            "ext": extracted.get("ext", ""),
+                                        },
+                                    ))
+                                    seen_xrefs.add(xref)
+                                    break  # One extraction per xref
+                            except Exception as e:
+                                logger.debug(
+                                    "Could not extract image xref %d on page %d: %s",
+                                    xref, page_num + 1, e,
+                                )
 
     return regions
 

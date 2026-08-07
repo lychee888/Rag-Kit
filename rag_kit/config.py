@@ -27,7 +27,7 @@ DEFAULT_CONFIG = {
     "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
     "vlm_model": "HuggingFaceTB/SmolVLM-256M-Instruct",
     "vlm_enabled": True,
-    "supported_extensions": [".pdf", ".docx", ".txt", ".md"],
+    "supported_extensions": [".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".tiff", ".webp"],
     "languages": ["zh", "en"],
     "chunk_size": 512,
     "chunk_overlap": 64,

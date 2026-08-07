@@ -2,6 +2,14 @@
 setlocal enabledelayedexpansion
 title rag-kit Installer (Windows)
 
+REM ============================================================
+REM   rag-kit Installer - Windows
+REM   Agentic RAG System for Hermes Agent
+REM   - installs all dependencies (pyproject: .[ocr])
+REM   - installs & boots the state-change watcher
+REM   - optional pinned model pre-download (offline-ready)
+REM ============================================================
+echo.
 echo ============================================================
 echo   rag-kit Installer - Windows
 echo   Agentic RAG System for Hermes Agent
@@ -11,9 +19,10 @@ echo.
 set "INSTALL_DIR=%USERPROFILE%\rag-kit-venv"
 set "SCRIPT_DIR=%~dp0"
 set "PROJECT_DIR=%SCRIPT_DIR%.."
+set "WATCH_FOLDER=%USERPROFILE%\Documents\rag-ingest"
 
 REM ---- Step 1: Check Python >= 3.10 ----
-echo [1/7] Checking Python...
+echo [1/8] Checking Python...
 
 where python >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
@@ -42,7 +51,7 @@ echo   OK: Python %PY_VER% meets requirements
 echo.
 
 REM ---- Step 2: Detect GPU ----
-echo [2/7] Detecting GPU...
+echo [2/8] Detecting GPU...
 
 set "USE_CUDA=0"
 where nvidia-smi >nul 2>&1
@@ -62,7 +71,7 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 
 REM ---- Step 3: Create virtual environment ----
-echo [3/7] Creating virtual environment at !INSTALL_DIR!...
+echo [3/8] Creating virtual environment at !INSTALL_DIR!...
 
 if exist "!INSTALL_DIR!" (
     echo   Removing existing installation...
@@ -78,7 +87,7 @@ echo   Created: !INSTALL_DIR!
 echo.
 
 REM ---- Step 4: Install dependencies ----
-echo [4/7] Installing dependencies...
+echo [4/8] Installing dependencies...
 
 call "!INSTALL_DIR!\Scripts\activate.bat" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
@@ -106,7 +115,7 @@ if %ERRORLEVEL% NEQ 0 (
     goto :end_fail
 )
 
-echo   Installing rag-kit and dependencies...
+echo   Installing rag-kit and dependencies (incl. OCR)...
 cd /d "%PROJECT_DIR%"
 python -m pip install -e ".[ocr]" --quiet
 
@@ -118,7 +127,7 @@ echo   Installation complete.
 echo.
 
 REM ---- Step 5: Verify imports and CLI ----
-echo [5/7] Verifying installation...
+echo [5/8] Verifying installation...
 
 REM Test imports
 python -c "import rag_kit; print('  rag_kit v' + rag_kit.__version__)" 2>nul
@@ -128,7 +137,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 python -c "import rag_kit.autostart; print('  autostart OK')" 2>nul
-python -c "import rag_kit.watcher; print('  watcher OK')" 2>nul
+python -c "import rag_kit.watchlock; print('  watchlock OK')" 2>nul
 
 REM Test CLI
 rag --version >nul 2>&1
@@ -148,17 +157,17 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 REM Create default watch folder
-if not exist "%USERPROFILE%\Documents\rag-ingest" (
-    mkdir "%USERPROFILE%\Documents\rag-ingest" 2>nul
-    if !ERRORLEVEL! EQU 0 echo   Created watch folder: %USERPROFILE%\Documents\rag-ingest
+if not exist "%WATCH_FOLDER%" (
+    mkdir "%WATCH_FOLDER%" 2>nul
+    if !ERRORLEVEL! EQU 0 echo   Created watch folder: %WATCH_FOLDER%
 )
 echo   Verification passed.
 echo.
 
 REM ---- Step 6: Setup autostart ----
-echo [6/7] Setting up autostart...
+echo [6/8] Setting up autostart...
 
-rag setup-autostart --interval 30 --json 2>nul
+rag setup-autostart --json 2>nul
 if %ERRORLEVEL% EQU 0 (
     echo   Autostart: Installed (rag-kit-watcher will start on logon)
 ) else (
@@ -168,18 +177,25 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
-REM ---- Step 7: Start watcher daemon ----
-echo [7/7] Starting watcher daemon...
+REM ---- Step 7: Initial backfill (state-change watcher takes over) ----
+echo [7/8] Backfilling existing documents...
 
-REM Use pythonw to run without a console window
-start /B pythonw -m rag_kit.watcher >nul 2>&1
+REM The autostart task runs "rag watch" on logon (event-driven).  Here we
+REM backfill existing files so they are searchable immediately.  The
+REM watcher uses a per-folder lock, so the one started below and the one
+REM autostart launches later cannot double-ingest.
+"!INSTALL_DIR!\Scripts\rag.exe" ingest "%WATCH_FOLDER%" --json >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    echo   Watcher: Running (background daemon)
-    echo   Watch folder: %USERPROFILE%\Documents\rag-ingest
+    echo   Backfill: complete (watch folder ready)
 ) else (
-    echo   Watcher: Could not start. Run manually:
-    echo     "!INSTALL_DIR!\Scripts\rag.exe" watch "%USERPROFILE%\Documents\rag-ingest"
+    echo   Backfill: nothing to ingest yet (new files will be picked up on logon).
 )
+
+REM Start the state-change watcher now (hidden, minimal window) so the
+REM library works immediately, not only after the next logon.
+start "rag-kit-watcher" /min "!INSTALL_DIR!\Scripts\rag.exe" watch "%WATCH_FOLDER%"
+echo   Watcher: started in background (minimized window)
+echo   Watch folder: %WATCH_FOLDER%
 echo.
 
 REM ---- Copy Hermes Agent skill ----
@@ -196,38 +212,48 @@ if exist "%SKILL_SRC%" (
     )
 )
 
+REM ---- Step 8 (optional): Pre-download pinned models ----
+echo.
+echo ============================================================
+echo   Optional: pre-download models for fully offline use.
+echo   (embedding ~470 MB + EasyOCR ~100 MB; VLM ~330 MB optional)
+echo ============================================================
+set /p DL_MODELS="Pre-download pinned models now (from GitHub Releases)? [y/N]: "
+if /i "!DL_MODELS!"=="y" (
+    REM Non-interactive: skip VLM here (see scripts\download-models.bat to add it later).
+    set "MODEL_DIR=%USERPROFILE%\models"
+    set "SKIP_VLM=1"
+    set "RAG_KIT_BATCH=1"
+    call "%SCRIPT_DIR%download-models.bat"
+   )
+
 REM ---- Summary ----
+echo.
 echo ============================================================
 echo   Installation Complete
 echo ============================================================
 echo.
 
 REM Check autostart status
-rag setup-autostart --json 2>nul | findstr /c:"installed" >nul
+rag setup-autostart --json 2>nul | findstr /c:"\"installed\": true" >nul
 if %ERRORLEVEL% EQU 0 (
     echo   Autostart:    Installed ^(on logon^)
 ) else (
     echo   Autostart:    NOT installed ^(run as Admin to install^)
 )
 
-REM Check if watcher is running
-tasklist /fi "imagename eq pythonw.exe" 2>nul | findstr /c:"pythonw" >nul
-if %ERRORLEVEL% EQU 0 (
-    echo   Watcher:      Running
-) else (
-    echo   Watcher:      Not running ^(start manually^)
-)
-
+REM Check watcher (via lock file presence is not needed now; report what we did)
+echo   Watcher:      Started in background; will also start at logon.
 echo.
 echo   Installation directory: !INSTALL_DIR!
 echo   CLI executable:        !INSTALL_DIR!\Scripts\rag.exe
 echo   Config file:           %USERPROFILE%\.rag-kit.yaml
-echo   Watch folder:          %USERPROFILE%\Documents\rag-ingest
+echo   Watch folder:          %WATCH_FOLDER%
 echo   Vector DB:             %USERPROFILE%\lancedb
 echo   Model cache:           %USERPROFILE%\models
 echo.
 echo   Quick start:
-echo     Drop documents in: %USERPROFILE%\Documents\rag-ingest
+echo     Drop documents in: %WATCH_FOLDER%
 echo     Then query:        rag query --json "your question"
 echo     Check status:      rag status
 echo.
@@ -243,7 +269,7 @@ echo ============================================================
 echo   Installation FAILED
 echo ============================================================
 echo   Please check the errors above and try again.
-echo   For help: https://github.com/jarvi/rag-kit
+echo   For help: https://github.com/jarvis959/Rag-Kit
 echo.
 pause
 exit /b 1

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -200,7 +201,8 @@ def test_list_files_and_delete(docs_dir, tmp_path):
 
     r = _rag_kit("list-files", "--json")
     data = json.loads(r.stdout)
-    assert "readme.md" in data["files"]
+    # Sources are stored as full (resolved) paths.
+    assert any(Path(s).name == "readme.md" for s in data["files"])
 
     # Delete.
     r = _rag_kit("delete", "readme.md", "--json")
@@ -208,7 +210,7 @@ def test_list_files_and_delete(docs_dir, tmp_path):
 
     r = _rag_kit("list-files", "--json")
     data = json.loads(r.stdout)
-    assert "readme.md" not in data["files"]
+    assert not any(Path(s).name == "readme.md" for s in data["files"])
 
 
 # ── Help text ────────────────────────────────────────────────────────

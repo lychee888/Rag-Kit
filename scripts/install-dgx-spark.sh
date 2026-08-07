@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---- Step 1: Check Python >= 3.10 ----
-echo -e "[1/7] Checking Python..."
+echo -e "[1/8] Checking Python..."
 
 PYTHON=""
 for cmd in python3.12 python3.11 python3.10 python3 python; do
@@ -54,7 +54,7 @@ echo "  OK: $PYTHON version $PYVER meets requirements"
 echo ""
 
 # ---- Step 2: Detect GPU (always CUDA on DGX, but verify) ----
-echo -e "[2/7] Detecting GPU..."
+echo -e "[2/8] Detecting GPU..."
 
 USE_CUDA=0
 if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
@@ -91,7 +91,7 @@ fi
 echo ""
 
 # ---- Step 3: Create virtual environment ----
-echo -e "[3/7] Creating virtual environment at $INSTALL_DIR..."
+echo -e "[3/8] Creating virtual environment at $INSTALL_DIR..."
 
 if [ -d "$INSTALL_DIR" ]; then
     echo "  Removing existing installation..."
@@ -107,7 +107,7 @@ echo "  Created: $INSTALL_DIR"
 echo ""
 
 # ---- Step 4: Install dependencies ----
-echo -e "[4/7] Installing dependencies..."
+echo -e "[4/8] Installing dependencies..."
 
 VENV_PYTHON="$INSTALL_DIR/bin/python"
 VENV_PIP="$INSTALL_DIR/bin/pip"
@@ -146,7 +146,7 @@ echo "  Installation complete."
 echo ""
 
 # ---- Step 5: Verify imports and CLI ----
-echo -e "[5/7] Verifying installation..."
+echo -e "[5/8] Verifying installation..."
 
 "$VENV_PYTHON" -c "import rag_kit; print('  rag_kit v' + rag_kit.__version__)" 2>/dev/null || {
     echo -e "  ${RED}ERROR: Failed to import rag_kit.${NC}"
@@ -176,9 +176,9 @@ echo "  Verification passed."
 echo ""
 
 # ---- Step 6: Setup autostart ----
-echo -e "[6/7] Setting up autostart..."
+echo -e "[6/8] Setting up autostart..."
 
-"$INSTALL_DIR/bin/rag" setup-autostart --interval 30 --json 2>/dev/null
+"$INSTALL_DIR/bin/rag" setup-autostart --json 2>/dev/null
 if [ $? -eq 0 ]; then
     echo "  Autostart: Installed (systemd user service + linger)"
 else
@@ -188,26 +188,52 @@ else
 fi
 echo ""
 
-# ---- Step 7: Start watcher daemon ----
-echo -e "[7/7] Starting watcher daemon..."
+# ---- Step 7: Start watcher (single instance, lock-protected) ----
+echo -e "[7/8] Starting watcher..."
 
-# Start the watcher in background via nohup.
+# Prefer the systemd user service (the same one autostart installed) so
+# only ONE watcher ever runs per folder — rag watch holds a per-folder
+# lock, so even if the installer start and the boot-time autostart race,
+# neither can double-ingest.
 WATCH_FOLDER="$HOME/Documents/rag-ingest"
-nohup "$INSTALL_DIR/bin/rag" watch "$WATCH_FOLDER" > "$HOME/.rag-kit-watcher.log" 2>&1 &
-WATCHER_PID=$!
 
-sleep 1
-if kill -0 "$WATCHER_PID" 2>/dev/null; then
-    echo "  Watcher: Running (PID: $WATCHER_PID)"
-    echo "  Watch folder: $WATCH_FOLDER"
-    echo "  Log: ~/.rag-kit-watcher.log"
+# Backfill existing files first: "rag watch" reacts only to NEW events,
+# so pre-existing documents need a one-time ingest to be indexable.
+echo "  Backfilling existing documents..."
+"$INSTALL_DIR/bin/rag" ingest "$WATCH_FOLDER" --json >/dev/null 2>&1 && \
+    echo "  Backfill: complete" || echo "  Backfill: nothing to ingest yet"
+
+if systemctl --user is-enabled rag-kit-watcher &>/dev/null 2>&1; then
+    systemctl --user start rag-kit-watcher 2>/dev/null || true
+    sleep 2
+    if systemctl --user is-active rag-kit-watcher &>/dev/null; then
+        echo "  Watcher: Running (systemd user service)"
+        echo "  Watch folder: $WATCH_FOLDER"
+        echo "  Log: journalctl --user -u rag-kit-watcher"
+    else
+        echo -e "  ${YELLOW}Watcher: systemd service present but not active. Starting temporarily...${NC}"
+        nohup "$INSTALL_DIR/bin/rag" watch "$WATCH_FOLDER" \
+            > "$HOME/.rag-kit-watcher.log" 2>&1 &
+        echo "  Watcher: Running (background, log: ~/.rag-kit-watcher.log)"
+    fi
 else
-    echo -e "  ${YELLOW}Watcher: Could not start. Run manually:${NC}"
-    echo "    $INSTALL_DIR/bin/rag watch $WATCH_FOLDER &"
+    nohup "$INSTALL_DIR/bin/rag" watch "$WATCH_FOLDER" \
+        > "$HOME/.rag-kit-watcher.log" 2>&1 &
+    echo "  Watcher: Running (background, log: ~/.rag-kit-watcher.log)"
 fi
 echo ""
 
-# ---- Copy Hermes Agent skill ----
+# ---- Step 8 (optional): Pre-download pinned models ----
+echo ""
+echo "============================================================"
+echo "  Optional: pre-download models for fully offline use."
+echo "  (embedding ~470 MB + EasyOCR ~100 MB; VLM ~330 MB optional)"
+echo "============================================================"
+read -r -p "Pre-download pinned models now (from GitHub Releases)? [y/N]: " DL_MODELS
+if [ "$DL_MODELS" = "y" ] || [ "$DL_MODELS" = "Y" ]; then
+    MODEL_DIR="$HOME/models" SKIP_VLM=1 bash "$SCRIPT_DIR/download-models.sh" || true
+fi
+
 SKILL_SRC="$PROJECT_DIR/SKILL.md"
 SKILL_DST="$HOME/.hermes/skills/research/rag-kit/SKILL.md"
 
@@ -233,11 +259,15 @@ else
     echo "  Autostart:    NOT installed"
 fi
 
-# Check if watcher is running
-if kill -0 "$WATCHER_PID" 2>/dev/null; then
-    echo "  Watcher:      Running (PID: $WATCHER_PID)"
+# Check if watcher is running (systemd service, else report status)
+if systemctl --user is-active rag-kit-watcher &>/dev/null; then
+    echo "  Watcher:      Running (systemd user service)"
 else
-    echo "  Watcher:      Not running (start manually)"
+    if pgrep -f "rag watch" >/dev/null 2>&1; then
+        echo "  Watcher:      Running (background)"
+    else
+        echo "  Watcher:      Not running (start with: $INSTALL_DIR/bin/rag watch $WATCH_FOLDER &)"
+    fi
 fi
 
 echo ""

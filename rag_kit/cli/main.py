@@ -190,7 +190,7 @@ def ingest(
         store_chunks.append({
             "id": c.get("id", c.get("chunk_id", "")),
             "text": c["text"],
-            "source": c.get("source_file", c.get("source", "")),
+            "source": c.get("source", c.get("source_file", "")),
             "page": int(c.get("page", 0)),
             "chunk_idx": int(c.get("chunk_idx", i)),
             "vlm_generated": bool(c.get("vlm_generated", False)),
@@ -256,7 +256,9 @@ def query_cmd(
     if source:
         results = store.search_by_source(query_vec, source=source, top_k=top_k)
     else:
-        results = store.search(query_vec, top_k=top_k)
+        # Hybrid (semantic + keyword) by default, weighted by search_alpha.
+        alpha = float(getattr(config, "search_alpha", 0.5) or 0.5)
+        results = store.search_hybrid(text, query_vec, top_k=top_k, alpha=alpha)
 
     if json_output:
         output = {
@@ -327,17 +329,35 @@ def list_files(
 
 @app.command()
 def delete(
-    file_path: str = typer.Argument(..., help="Path of the file to remove from DB."),
+    file_path: str = typer.Argument(..., help="Path (full or filename) of the file to remove from DB."),
     json_output: bool = typer.Option(False, "--json", help="Output JSON for agent consumption."),
 ) -> None:
-    """Remove a file's chunks from the vector DB."""
+    """Remove a file's chunks from the vector DB.
+
+    Accepts either a full path as stored in the DB or a bare filename
+    (in which case all sources with that basename are removed).
+    """
     _ensure_config()
     store = create_store_from_config(get_config())
-    try:
-        removed = store.delete_by_source(file_path)
-    except RuntimeError:
-        # Table doesn't exist yet — nothing to delete.
-        removed = 0
+
+    # 1. Try exact match on resolved path, then basename, then any stored
+    #    source whose file name matches (handles full paths and bare names).
+    targets = [str(Path(file_path).resolve())]
+    if Path(file_path).name == file_path:
+        # Bare filename: match against stored sources by basename.
+        try:
+            targets += [s for s in store.list_sources()
+                        if Path(s).name == file_path]
+        except RuntimeError:
+            pass
+
+    removed = 0
+    for target in dict.fromkeys(targets):
+        try:
+            removed += store.delete_by_source(target)
+        except RuntimeError:
+            # Table doesn't exist yet — nothing to delete.
+            pass
 
     if json_output:
         typer.echo(json.dumps({"status": "ok", "file": file_path, "removed_chunks": removed},
@@ -513,9 +533,11 @@ class _WatchHandler:
         self._config = config
         self._debounce = debounce_seconds
         self._json = json_output
-        self._pending: dict[str, float] = {}  # path -> last event time
+        self._pending_events: dict[str, float] = {}  # path -> last event time
+        self._pending_deletes: set[str] = set()      # resolved abs paths to remove
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._resume = threading.Event()
         self._worker: threading.Thread | None = None
 
         _CLI_LOGGER.info("Watch handler initialised (debounce=%.1fs)", debounce_seconds)
@@ -529,37 +551,71 @@ class _WatchHandler:
         if ext not in SUPPORTED_EXTENSIONS:
             return
         with self._lock:
-            self._pending[file_path] = time.monotonic()
+            if event_type == "deleted":
+                # Deletes are handled immediately (no debounce) so that
+                # removed files drop out of search right away. Keep them in
+                # a separate set — never touch _pending_events for deletes.
+                self._pending_deletes.add(str(Path(file_path).resolve()))
+            else:
+                self._pending_events[file_path] = time.monotonic()
+        # wake the worker immediately for deletes
+        self._resume.set()
 
     def start_worker(self) -> None:
         self._worker = threading.Thread(target=self._process_loop, daemon=True)
         self._worker.start()
 
     def _process_loop(self) -> None:
-        """Background thread: periodically check for stable files and ingest."""
+        """Background thread: process deletes immediately, ingest stable files."""
         _CLI_LOGGER.info("Watcher worker started")
         while not self._stop.wait(timeout=0.5):
+            # 1. Handle pending deletes first (immediate).
+            deletes: list[str] = []
+            with self._lock:
+                if self._pending_deletes:
+                    deletes = list(self._pending_deletes)
+                    self._pending_deletes.clear()
+            for abs_path in deletes:
+                self._delete_one(abs_path)
+
+            # 2. Ingest files that have been stable for the debounce period.
             to_process: list[str] = []
             now = time.monotonic()
             with self._lock:
-                for path, ts in list(self._pending.items()):
+                for path, ts in list(self._pending_events.items()):
                     if now - ts >= self._debounce:
                         to_process.append(path)
-                        del self._pending[path]
+                        del self._pending_events[path]
 
             for file_path in to_process:
                 self._ingest_one(file_path)
 
         _CLI_LOGGER.info("Watcher worker stopped")
 
+    def _delete_one(self, abs_path: str) -> None:
+        """Remove all stored chunks for a deleted file and report to the user."""
+        _CLI_LOGGER.info("Deleting vectors for removed file: %s", abs_path)
+        try:
+            store = create_store_from_config(self._config)
+            deleted = store.delete_by_source(abs_path)
+            _CLI_LOGGER.info("Removed %d chunk(s) for %s", deleted, abs_path)
+        except RuntimeError:
+            pass  # table doesn't exist yet — nothing to delete
+        except Exception as exc:
+            _CLI_LOGGER.error("Failed to remove vectors for %s: %s", abs_path, exc)
+
     def _ingest_one(self, file_path: str) -> None:
         """Ingest a single file that has stabilised."""
         start = time.monotonic()
         _CLI_LOGGER.info("Processing: %s", file_path)
 
+        # Resolve once so the stored ``source`` matches the value used for
+        # delete-by-source replacement (and later file-removal deletes).
+        abs_path = str(Path(file_path).resolve())
+
         try:
             chunks = ingest_file(
-                file_path,
+                abs_path,
                 chunk_size=self._config.chunk_size,
                 chunk_overlap=self._config.chunk_overlap,
                 languages=self._config.languages,
@@ -580,7 +636,7 @@ class _WatchHandler:
             store_chunks.append({
                 "id": c.get("id", c.get("chunk_id", "")),
                 "text": c["text"],
-                "source": c.get("source_file", c.get("source", "")),
+                "source": c.get("source", c.get("source_file", "")),
                 "page": int(c.get("page", 0)),
                 "chunk_idx": int(c.get("chunk_idx", i)),
                 "vlm_generated": bool(c.get("vlm_generated", False)),
@@ -592,6 +648,13 @@ class _WatchHandler:
             engine = create_engine_from_config(self._config)
             texts = [c["text"] for c in store_chunks]
             vectors = engine.embed_texts(texts)
+            # Replace any previous chunks for this source (re-ingest of a
+            # modified file must not leave stale rows behind). Drop-guard:
+            # on a fresh DB the table doesn't exist yet, which is fine.
+            try:
+                store.delete_by_source(abs_path)
+            except RuntimeError:
+                pass
             added = store.add_chunks(store_chunks, vectors)
             elapsed = time.monotonic() - start
 
@@ -626,26 +689,36 @@ class _WatchHandler:
 
 
 class _DebouncedEventHandler:
-    """Minimal watchdog event handler that calls a callback on file create/modify."""
+    """Minimal watchdog event handler that calls a callback on file changes."""
 
     def __init__(self, callback: Any) -> None:
         self._callback = callback
 
     def dispatch(self, event: Any) -> None:
-        # watchdog's dispatch method — only handle file create/modify.
-        from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileMovedEvent
+        # watchdog's dispatch method — handle create/modify/move/delete.
+        from watchdog.events import (
+            FileCreatedEvent,
+            FileDeletedEvent,
+            FileModifiedEvent,
+            FileMovedEvent,
+        )
 
         if isinstance(event, (FileCreatedEvent, FileModifiedEvent)):
             if not event.is_directory:
                 self._callback("created_or_modified", event.src_path)
         elif isinstance(event, FileMovedEvent):
             if not event.is_directory:
+                # Moved TO our folder => ingest at destination; if it came
+                # from inside our folder the destination replaces it anyway.
                 self._callback("created_or_modified", event.dest_path)
+        elif isinstance(event, FileDeletedEvent):
+            if not event.is_directory:
+                self._callback("deleted", event.src_path)
 
 
 @app.command()
 def watch(
-    folder: str = typer.Argument(..., help="Folder to watch for new/modified documents."),
+    folder: str | None = typer.Argument(None, help="Folder to watch for new/modified documents (default: config watch_folder)."),
     debounce: float = typer.Option(2.0, "--debounce", "-d",
                                     help="Seconds to wait after last file event before ingesting."),
     json_output: bool = typer.Option(False, "--json", help="Output JSON for agent consumption."),
@@ -662,13 +735,30 @@ def watch(
     """
     config = _ensure_config()
 
-    folder_path = Path(folder)
+    folder_path = Path(folder) if folder else Path(config.watch_folder)
     if not folder_path.is_dir():
-        typer.echo(f"Error: not a directory: {folder}", err=True)
+        folder_path = Path(config.watch_folder)
+    if not folder_path.is_dir():
+        typer.echo(f"Error: folder does not exist: {folder_path} — set watch_folder in config first", err=True)
         raise typer.Exit(code=1)
 
     # Override config's watch_folder with the CLI argument.
     config.watch_folder = str(folder_path.resolve())
+
+    # Single-instance guard: if another live watcher already owns this
+    # folder (e.g. started by the installer while autostart kicks in),
+    # exit cleanly instead of double-ingesting.
+    from rag_kit import watchlock
+    lock = watchlock.acquire(folder_path)
+    if lock is None:
+        msg = (f"Another rag watcher is already watching: {folder_path}. "
+               f"Nothing to do.")
+        if json_output:
+            typer.echo(json.dumps({"status": "already_running", "message": msg},
+                                  ensure_ascii=False))
+        else:
+            typer.echo(msg, err=True)
+        raise typer.Exit(code=0)
 
     typer.echo(f"Watching: {folder_path}")
     typer.echo(f"  Extensions: {', '.join(config.supported_extensions)}")
@@ -727,6 +817,9 @@ def watch(
     watch_handler.flush_and_stop()
     observer.stop()
     observer.join(timeout=5)
+
+    # Release the single-instance lock so a later start can pick up.
+    watchlock.release(lock)
 
     typer.echo("Done.")
 

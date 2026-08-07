@@ -57,19 +57,48 @@ if [[ "$SOURCE" == "github" ]]; then
     echo "  Target: $MODEL_DIR"
     echo ""
 
+    # Download + verify: curl an expected minimum size (bytes), then
+    # validate archive integrity before extracting so a truncated or
+    # corrupt tarball never pollutes the model cache.
+    download_and_extract() {
+        local url="$1" dest="$2" min_bytes="$3" label="$4"
+        local tmp
+        tmp=$(mktemp "$MODEL_DIR/.dl.XXXXXX.tar.gz")
+        echo -e "  [*] Fetching $label ..."
+        local actual
+        actual=$(curl -L --progress-bar -o "$tmp" -w '%{size_download}' "$url")
+        if [[ -z "$actual" || "$actual" -lt "$min_bytes" ]]; then
+            echo -e "${RED}    ERROR: $label download too small (got ${actual:-0} bytes, expected >= $min_bytes)${NC}"
+            rm -f "$tmp"
+            return 1
+        fi
+        # Integrity check: list archive contents; exit non-zero if corrupt.
+        if ! tar -tzf "$tmp" >/dev/null 2>&1; then
+            echo -e "${RED}    ERROR: $label archive is corrupt, not extracting.${NC}"
+            rm -f "$tmp"
+            return 1
+        fi
+        mkdir -p "$dest"
+        if ! tar -xzf "$tmp" -C "$dest"; then
+            echo -e "${RED}    ERROR: failed to extract $label.${NC}"
+            rm -f "$tmp"
+            return 1
+        fi
+        rm -f "$tmp"
+        echo -e "    ${GREEN}OK${NC}"
+        return 0
+    }
+
     # ---- 1. Embedding model ----
     EMBED_DIR="$MODEL_DIR/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/snapshots/e8f8c211226b894fcb81acc59f3b34ba3efd5f42"
     if [[ -f "$EMBED_DIR/model.safetensors" ]]; then
         echo -e "  [1/3] Embedding model: ${GREEN}already present${NC}"
     else
-        echo -e "  [1/3] Downloading embedding model (~832 MB)..."
-        mkdir -p /tmp/rag-kit-models
-        curl -L --progress-bar -o /tmp/rag-kit-models/embedding.tar.gz \
-            "${RELEASE_BASE}/embedding-model.tar.gz"
-        mkdir -p "$MODEL_DIR"
-        tar -xzf /tmp/rag-kit-models/embedding.tar.gz -C "$MODEL_DIR"
-        rm -f /tmp/rag-kit-models/embedding.tar.gz
-        echo -e "    ${GREEN}OK${NC}"
+        echo -e "  [1/3] Downloading embedding model (~470 MB)..."
+        mkdir -p "$EMBED_DIR"
+        if ! download_and_extract "${RELEASE_BASE}/embedding-model.tar.gz" "$EMBED_DIR" 400000000 "embedding model"; then
+            echo -e "${YELLOW}    Will fall back to HuggingFace hub at runtime.${NC}"
+        fi
     fi
 
     # ---- 2. EasyOCR models ----
@@ -78,34 +107,30 @@ if [[ "$SOURCE" == "github" ]]; then
         echo -e "  [2/3] EasyOCR models: ${GREEN}already present${NC}"
     else
         echo -e "  [2/3] Downloading EasyOCR models (~93 MB)..."
-        curl -L --progress-bar -o /tmp/rag-kit-models/easyocr.tar.gz \
-            "${RELEASE_BASE}/easyocr-models.tar.gz"
         mkdir -p "$EASYOCR_DIR"
-        tar -xzf /tmp/rag-kit-models/easyocr.tar.gz -C "$EASYOCR_DIR"
-        rm -f /tmp/rag-kit-models/easyocr.tar.gz
-        echo -e "    ${GREEN}OK${NC}"
+        if ! download_and_extract "${RELEASE_BASE}/easyocr-models.tar.gz" "$EASYOCR_DIR" 80000000 "easyocr models"; then
+            echo -e "${YELLOW}    Will fall back to EasyOCR's CDN at runtime.${NC}"
+        fi
     fi
 
     # ---- 3. SmolVLM (optional) ----
     VLM_DIR="$MODEL_DIR/models--HuggingFaceTB--SmolVLM-256M-Instruct/snapshots/manual"
     if [[ -f "$VLM_DIR/model.safetensors" ]]; then
         echo -e "  [3/3] SmolVLM: ${GREEN}already present${NC}"
+    elif [[ "${SKIP_VLM:-}" == "1" ]]; then
+        echo -e "  [3/3] SmolVLM: ${YELLOW}skipped (SKIP_VLM=1)${NC}"
     else
         echo -n "  [3/3] Download SmolVLM (~333 MB)? [Y/n]: "
         read -r DL_VLM
         if [[ "$DL_VLM" != "n" && "$DL_VLM" != "N" ]]; then
-            curl -L --progress-bar -o /tmp/rag-kit-models/smolvlm.tar.gz \
-                "${RELEASE_BASE}/smolvlm-model.tar.gz"
             mkdir -p "$VLM_DIR"
-            tar -xzf /tmp/rag-kit-models/smolvlm.tar.gz -C "$VLM_DIR"
-            rm -f /tmp/rag-kit-models/smolvlm.tar.gz
-            echo -e "    ${GREEN}OK${NC}"
+            if ! download_and_extract "${RELEASE_BASE}/smolvlm-model.tar.gz" "$VLM_DIR" 250000000 "SmolVLM"; then
+                echo -e "${YELLOW}    Will fall back to HuggingFace hub at runtime.${NC}"
+            fi
         else
             echo "    Skipped (VLM is optional)"
         fi
     fi
-
-    rmdir /tmp/rag-kit-models 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}============================================================${NC}"
