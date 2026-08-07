@@ -20,7 +20,7 @@ vlm_model: SmolVLM-256M-Instruct
 vlm_enabled: true
 
 # Supported file extensions for ingestion.
-supported_extensions: [.pdf, .docx, .txt, .md]
+supported_extensions: [.pdf, .docx, .xlsx, .pptx, .txt, .md, .png, .jpg, .jpeg, .tiff, .webp]
 
 # Languages for OCR and text processing.
 languages: [zh, en]
@@ -29,7 +29,7 @@ languages: [zh, en]
 chunk_size: 512
 chunk_overlap: 64
 
-# Folder watcher poll interval (seconds).
+# Reserved. The watcher is event-based (watchdog) — no poll interval needed.
 watch_interval: 30
 
 # Hybrid search blend: 0.0 = pure keyword, 1.0 = pure semantic.

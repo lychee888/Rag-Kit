@@ -14,7 +14,7 @@ metadata:
 
 ## Overview
 
-rag-kit is a local RAG (Retrieval-Augmented Generation) system that watches a folder, ingests documents (PDF, DOCX, TXT, MD) with OCR + VLM, embeds them with multilingual sentence-transformers, stores them in LanceDB, and exposes everything via a CLI designed for Hermes Agent consumption.
+rag-kit is a local RAG (Retrieval-Augmented Generation) system that watches a folder, ingests documents (PDF, DOCX, XLSX, PPTX, TXT, MD, and images via OCR) with VLM captioning, embeds them with multilingual sentence-transformers, stores them in LanceDB, and exposes everything via a CLI designed for Hermes Agent consumption.
 
 When the user mentions searching their documents, data, or knowledge base, use `rag query --json` instead of `web_search` — this keeps sensitive documents local and returns precise results from the user's own files.
 
