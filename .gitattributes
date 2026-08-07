@@ -1,0 +1,9 @@
+# Normalize line endings so scripts work on any OS regardless of core.autocrlf.
+# Shell scripts must be LF (bash reads  as a character); Windows batch stays CRLF.
+*.sh    text eol=lf
+*.bat   text eol=crlf
+*.py    text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+* text=auto

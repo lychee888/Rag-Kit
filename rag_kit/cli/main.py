@@ -680,8 +680,8 @@ class _WatchHandler:
 
         # Process anything still pending.
         with self._lock:
-            remaining = list(self._pending.keys())
-            self._pending.clear()
+            remaining = list(self._pending_events.keys())
+            self._pending_events.clear()
 
         for file_path in remaining:
             _CLI_LOGGER.info("Flushing pending: %s", file_path)

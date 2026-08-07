@@ -60,8 +60,9 @@ if %ERRORLEVEL% EQU 0 (
     if !ERRORLEVEL! EQU 0 (
         set "USE_CUDA=1"
         for /f "tokens=*" %%g in ('nvidia-smi --query-gpu^=name --format^=csv^,noheader 2^>nul') do set "GPU_NAME=%%g"
-        echo   GPU detected: !GPU_NAME!
-        echo   Will install PyTorch with CUDA support.
+        for /f "tokens=*" %%c in ('nvidia-smi --query-gpu^=compute_cap --format^=csv^,noheader 2^>nul') do set "GPU_CC=%%c"
+        echo   GPU detected: !GPU_NAME! ^(compute cap !GPU_CC!^)
+        echo   Will install a PyTorch build compatible with this GPU.
     ) else (
         echo   nvidia-smi found but GPU not available. Using CPU mode.
     )
@@ -72,6 +73,11 @@ echo.
 
 REM ---- Step 3: Create virtual environment ----
 echo [3/8] Creating virtual environment at !INSTALL_DIR!...
+
+REM Stop any running rag-kit watcher first — it keeps the old venv's exe open,
+REM which would block removing / recreating the venv (file-lock on python.exe).
+taskkill /f /im rag.exe >nul 2>&1
+timeout /t 1 /nobreak >nul 2>&1
 
 if exist "!INSTALL_DIR!" (
     echo   Removing existing installation...
@@ -98,19 +104,33 @@ if %ERRORLEVEL% NEQ 0 (
 REM Upgrade pip first
 python -m pip install --upgrade pip --quiet 2>nul
 
+REM Isolate from any inherited PYTHONPATH (e.g. an agent/venv shell) so pip
+REM and python resolve purely against this venv. Use a non-existent path so
+REM the variable stays non-empty (an EMPTY PYTHONPATH crashes some Python builds).
+set "PYTHONPATH=%TEMP%\ragkit_empty_pypath"
+
+set "TORCH_OK="
 if !USE_CUDA! EQU 1 (
-    echo   Installing PyTorch with CUDA...
-    python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet
-    if !ERRORLEVEL! NEQ 0 (
-        echo   WARNING: CUDA PyTorch failed. Falling back to CPU PyTorch...
+    echo   Installing PyTorch ^(CUDA-enabled build — cu128, supports Blackwell^)...
+    python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --quiet
+    if !ERRORLEVEL! EQU 0 set "TORCH_OK=1"
+    if not defined TORCH_OK (
+        echo   WARNING: cu128 build failed; trying cu124 ^(for older GPUs^)...
+        python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet
+        if !ERRORLEVEL! EQU 0 set "TORCH_OK=1"
+    )
+    if not defined TORCH_OK (
+        echo   WARNING: CUDA PyTorch failed. Falling back to CPU-only PyTorch...
         python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+        if !ERRORLEVEL! EQU 0 set "TORCH_OK=1"
     )
 ) else (
-    echo   Installing PyTorch (CPU)...
+    echo   Installing PyTorch ^(CPU-only^)...
     python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+    if !ERRORLEVEL! EQU 0 set "TORCH_OK=1"
 )
 
-if %ERRORLEVEL% NEQ 0 (
+if not defined TORCH_OK (
     echo   ERROR: Failed to install PyTorch.
     goto :end_fail
 )
@@ -139,7 +159,16 @@ if %ERRORLEVEL% NEQ 0 (
 python -c "import rag_kit.autostart; print('  autostart OK')" 2>nul
 python -c "import rag_kit.watchlock; print('  watchlock OK')" 2>nul
 
-REM Test CLI
+REM Heavy-stack import check (catches broken sentence-transformers / tokenizers)
+python -c "import sentence_transformers, tokenizers; print('  ML stack OK (tokenizers ' + tokenizers.__version__ + ')')" 2>nul
+if %ERRORLEVEL% EQU 0 (
+    echo   ML stack: sentence-transformers OK
+) else (
+    echo   WARNING: sentence-transformers import check failed ^(dependency version conflict?^).
+    echo   Reinstall with:  python -m pip install -e \".\[ocr]\"
+    echo   Common cause: an incompatible tokenizers build.
+)
+
 rag --version >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo   CLI: rag --version OK
@@ -153,7 +182,7 @@ rag config init >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo   Config: Created default config
 ) else (
-    echo   WARNING: Could not create default config (non-fatal)
+    echo   WARNING: Could not create default config ^(non-fatal^)
 )
 
 REM Create default watch folder
@@ -169,7 +198,7 @@ echo [6/8] Setting up autostart...
 
 rag setup-autostart --json 2>nul
 if %ERRORLEVEL% EQU 0 (
-    echo   Autostart: Installed (rag-kit-watcher will start on logon)
+    echo   Autostart: Installed ^(rag-kit-watcher will start on logon^)
 ) else (
     echo   Autostart: NOT installed ^(admin rights required for schtasks^)
     echo   To install autostart manually, run as Administrator:
@@ -186,9 +215,14 @@ REM watcher uses a per-folder lock, so the one started below and the one
 REM autostart launches later cannot double-ingest.
 "!INSTALL_DIR!\Scripts\rag.exe" ingest "%WATCH_FOLDER%" --json >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    echo   Backfill: complete (watch folder ready)
+    "!INSTALL_DIR!\Scripts\rag.exe" list-files --json 2>nul | findstr /c:"file_count" >nul
+    if !ERRORLEVEL! EQU 0 (
+        echo   Backfill: complete ^(documents indexed^)
+    ) else (
+        echo   Backfill: nothing to ingest yet ^(folder is empty; new files are picked up live^).
+    )
 ) else (
-    echo   Backfill: nothing to ingest yet (new files will be picked up on logon).
+    echo   Backfill: nothing to ingest yet ^(new files will be picked up on logon^).
 )
 
 REM Start the state-change watcher now (hidden, minimal window) so the

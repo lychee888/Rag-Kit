@@ -60,8 +60,9 @@ USE_CUDA=0
 if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
     USE_CUDA=1
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "NVIDIA GPU")
-    echo "  GPU detected: $GPU_NAME"
-    echo "  Will install PyTorch with CUDA support (CUDA 12.4)."
+    GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 || echo "?")
+    echo "  GPU detected: $GPU_NAME (compute cap $GPU_CC)"
+    echo "  Will install a PyTorch build compatible with this GPU."
 else
     echo -e "  ${YELLOW}No NVIDIA GPU detected. Using CPU mode.${NC}"
     echo "  Note: DGX Spark should have a Blackwell GPU — check nvidia-smi if missing."
@@ -79,14 +80,17 @@ echo ""
 # ---- Step 2b: System dependencies ----
 echo "  Checking system dependencies..."
 
-if ! command -v python3-venv &>/dev/null; then
+if ! "$PYTHON" -m venv --help >/dev/null 2>&1; then
     echo "  Installing python3-venv..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq python3-venv python3-pip 2>/dev/null || {
-        echo -e "  ${RED}ERROR: Failed to install system packages. Try:${NC}"
-        echo "    sudo apt-get install -y python3-venv python3-pip"
-        exit 1
-    }
+    if command -v apt-get >/dev/null && command -v sudo >/dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq python3-venv python3-pip 2>/dev/null || {
+            echo -e "  ${YELLOW}Could not auto-install python3-venv (you may need a password).${NC}"
+            echo "    sudo apt-get install -y python3-venv python3-pip"
+        }
+    else
+        echo -e "  ${YELLOW}python venv module unavailable and no apt-get/sudo found.${NC}"
+    fi
 fi
 echo ""
 
@@ -112,24 +116,39 @@ echo -e "[4/8] Installing dependencies..."
 VENV_PYTHON="$INSTALL_DIR/bin/python"
 VENV_PIP="$INSTALL_DIR/bin/pip"
 
-# Upgrade pip
-"$VENV_PYTHON" -m pip install --upgrade pip -q 2>/dev/null
+# Upgrade pip; isolate from any inherited PYTHONPATH so pip only sees this venv.
+unset PYTHONPATH 2>/dev/null || true
+"$VENV_PYTHON" -m pip install --upgrade pip -q 2>/dev/null || true
 
+TORCH_OK=0
 if [ "$USE_CUDA" -eq 1 ]; then
-    echo "  Installing PyTorch with CUDA (ARM64-compatible)..."
-    "$VENV_PIP" install torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu124 -q 2>/dev/null || {
-        echo -e "  ${YELLOW}WARNING: CUDA PyTorch failed. Falling back to CPU PyTorch...${NC}"
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+        echo "  Installing PyTorch with CUDA (aarch64)..."
         "$VENV_PIP" install torch torchvision torchaudio \
-            --index-url https://download.pytorch.org/whl/cpu -q
-    }
+            --index-url https://download.pytorch.org/whl/cu126 -q 2>/dev/null && TORCH_OK=1
+    else
+        echo "  Installing PyTorch (CUDA-enabled build — cu128, supports Blackwell)..."
+        # Explicit CUDA build: the default PyPI torch is CPU-only on some platforms.
+        "$VENV_PIP" install torch torchvision torchaudio \
+            --index-url https://download.pytorch.org/whl/cu128 -q 2>/dev/null && TORCH_OK=1
+    fi
+    if [ "$TORCH_OK" -eq 0 ]; then
+        echo -e "  ${YELLOW}WARNING: cu128 build failed; trying cu124 (for older GPUs)...${NC}"
+        "$VENV_PIP" install torch torchvision torchaudio \
+            --index-url https://download.pytorch.org/whl/cu124 -q 2>/dev/null && TORCH_OK=1
+    fi
+    if [ "$TORCH_OK" -eq 0 ]; then
+        echo -e "  ${YELLOW}WARNING: CUDA PyTorch failed; falling back to CPU PyTorch...${NC}"
+        "$VENV_PIP" install torch torchvision torchaudio \
+            --index-url https://download.pytorch.org/whl/cpu -q && TORCH_OK=1
+    fi
 else
     echo "  Installing PyTorch (CPU)..."
     "$VENV_PIP" install torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cpu -q
+        --index-url https://download.pytorch.org/whl/cpu -q && TORCH_OK=1
 fi
 
-if [ $? -ne 0 ]; then
+if [ "$TORCH_OK" -ne 1 ]; then
     echo -e "  ${RED}ERROR: Failed to install PyTorch.${NC}"
     exit 1
 fi
@@ -155,6 +174,14 @@ echo -e "[5/8] Verifying installation..."
 
 "$VENV_PYTHON" -c "import rag_kit.autostart; print('  autostart OK')" 2>/dev/null
 "$VENV_PYTHON" -c "import rag_kit.watcher; print('  watcher OK')" 2>/dev/null
+
+# Heavy-stack import check (catches broken sentence-transformers / tokenizers)
+if "$VENV_PYTHON" -c "import sentence_transformers, tokenizers; print('  ML stack OK (tokenizers ' + tokenizers.__version__ + ')')" 2>/dev/null; then
+    echo "  ML stack: sentence-transformers OK"
+else
+    echo -e "  ${YELLOW}WARNING: sentence-transformers import check failed (dependency version conflict?).${NC}"
+    echo "  Reinstall with:  pip install -e '.[ocr]'"
+fi
 
 # Test CLI
 if "$VENV_PYTHON" -m rag_kit.cli.main --version &>/dev/null; then
@@ -200,8 +227,15 @@ WATCH_FOLDER="$HOME/Documents/rag-ingest"
 # Backfill existing files first: "rag watch" reacts only to NEW events,
 # so pre-existing documents need a one-time ingest to be indexable.
 echo "  Backfilling existing documents..."
-"$INSTALL_DIR/bin/rag" ingest "$WATCH_FOLDER" --json >/dev/null 2>&1 && \
-    echo "  Backfill: complete" || echo "  Backfill: nothing to ingest yet"
+if "$INSTALL_DIR/bin/rag" ingest "$WATCH_FOLDER" --json >/dev/null 2>&1; then
+    if "$INSTALL_DIR/bin/rag" list-files --json 2>/dev/null | grep -q "file_count"; then
+        echo "  Backfill: complete (documents indexed)"
+    else
+        echo "  Backfill: nothing to ingest yet (folder is empty; new files are picked up live)"
+    fi
+else
+    echo "  Backfill: nothing to ingest yet"
+fi
 
 if systemctl --user is-enabled rag-kit-watcher &>/dev/null 2>&1; then
     systemctl --user start rag-kit-watcher 2>/dev/null || true
@@ -229,7 +263,10 @@ echo "============================================================"
 echo "  Optional: pre-download models for fully offline use."
 echo "  (embedding ~470 MB + EasyOCR ~100 MB; VLM ~330 MB optional)"
 echo "============================================================"
-read -r -p "Pre-download pinned models now (from GitHub Releases)? [y/N]: " DL_MODELS
+DL_MODELS=""
+if [ -t 0 ]; then
+    read -r -p "Pre-download pinned models now (from GitHub Releases)? [y/N]: " DL_MODELS || true
+fi
 if [ "$DL_MODELS" = "y" ] || [ "$DL_MODELS" = "Y" ]; then
     MODEL_DIR="$HOME/models" SKIP_VLM=1 bash "$SCRIPT_DIR/download-models.sh" || true
 fi
@@ -287,5 +324,5 @@ echo ""
 echo "  For help: $INSTALL_DIR/bin/rag --help"
 echo ""
 
-read -r -p "Press Enter to finish..." _dummy
+read -r -p "Press Enter to finish..." _dummy 2>/dev/null || true
 exit 0

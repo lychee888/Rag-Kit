@@ -56,7 +56,7 @@ if not defined SKIP_VLM (
         set "SKIP_VLM=0"
     )
 ) else (
-    echo   VLM choice inherited from environment (SKIP_VLM=!SKIP_VLM!)
+    echo   VLM choice inherited from environment ^(SKIP_VLM=!SKIP_VLM!^)
 )
 
 echo.
@@ -219,6 +219,9 @@ setlocal
 if defined HF_ENDPOINT set "HF_ENDPOINT=%HF_ENDPOINT%"
 set "MODEL_DIR=%MODEL_DIR%"
 set "SKIP_VLM=%SKIP_VLM%"
+
+REM Isolate from any inherited PYTHONPATH (see install-windows.bat).
+set "PYTHONPATH=%TEMP%\ragkit_empty_pypath"
 
 python "%SCRIPT%"
 set "DL_EXIT=%ERRORLEVEL%"

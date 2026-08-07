@@ -123,8 +123,10 @@ if [[ "$SOURCE" == "github" ]]; then
     elif [[ "${SKIP_VLM:-}" == "1" ]]; then
         echo -e "  [3/3] SmolVLM: ${YELLOW}skipped (SKIP_VLM=1)${NC}"
     else
-        echo -n "  [3/3] Download SmolVLM (~333 MB)? [Y/n]: "
-        read -r DL_VLM
+        DL_VLM=""
+        if [ -t 0 ]; then
+            read -r -p "  [3/3] Download SmolVLM (~333 MB)? [Y/n]: " DL_VLM || true
+        fi
         if [[ "$DL_VLM" != "n" && "$DL_VLM" != "N" ]]; then
             mkdir -p "$VLM_DIR"
             if ! download_and_extract "${RELEASE_BASE}/smolvlm-model.tar.gz" "$VLM_DIR" 250000000 "SmolVLM"; then
@@ -178,8 +180,10 @@ fi
 
 # China mirror
 if [ -z "${HF_ENDPOINT:-}" ]; then
-    echo -n "Use China mirror (hf-mirror.com)? [y/N]: "
-    read -r USE_MIRROR
+    USE_MIRROR=""
+    if [ -t 0 ]; then
+        read -r -p "Use China mirror (hf-mirror.com)? [y/N]: " USE_MIRROR || true
+    fi
     if [ "$USE_MIRROR" = "y" ] || [ "$USE_MIRROR" = "Y" ]; then
         export HF_ENDPOINT="https://hf-mirror.com"
         echo "Using mirror: $HF_ENDPOINT"
@@ -194,8 +198,10 @@ echo "  2. EasyOCR ch_sim + en (OCR, ~100 MB download)"
 echo "  3. SmolVLM-256M-Instruct (VLM, ~500 MB) - optional"
 echo ""
 
-echo -n "Download SmolVLM? [Y/n]: "
-read -r DOWNLOAD_VLM
+DOWNLOAD_VLM=""
+if [ -t 0 ]; then
+    read -r -p "Download SmolVLM? [Y/n]: " DOWNLOAD_VLM || true
+fi
 SKIP_VLM=0
 if [ "$DOWNLOAD_VLM" = "n" ] || [ "$DOWNLOAD_VLM" = "N" ]; then
     SKIP_VLM=1

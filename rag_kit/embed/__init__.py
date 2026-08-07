@@ -270,8 +270,12 @@ class EmbeddingEngine:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise ImportError(
-                "sentence-transformers is not installed. "
-                "Install with: pip install sentence-transformers"
+                "sentence-transformers could not be imported — this usually means a "
+                "dependency version conflict (most commonly an incompatible "
+                "tokenizers build). Underlying error:\n"
+                f"  {exc}\n"
+                "Fix: reinstall the project dependencies (a clean venv works best):\n"
+                '  pip install -e ".[ocr]"'
             ) from exc
 
         self._model = SentenceTransformer(self.model_name, **cache_kwargs)
