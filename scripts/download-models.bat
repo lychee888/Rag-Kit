@@ -7,6 +7,9 @@ REM   rag-kit - Model Downloader (Windows)
 REM   Pre-downloads pinned models for fully offline rag-kit use.
 REM   Prefers pinned GitHub Release tarballs (with integrity
 REM   checks); falls back to the HuggingFace hub if unavailable.
+REM
+REM   Model weights are Apache-2.0, re-distributed with attribution -
+REM   see THIRD_PARTY_NOTICES.md (and licenses/APACHE-2.0.txt).
 REM ============================================================
 echo.
 echo ============================================================

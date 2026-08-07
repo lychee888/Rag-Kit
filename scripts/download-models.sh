@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # download-models.sh — Pre-download all models for offline rag-kit use
 #
+# Model weights are Apache-2.0 and are re-distributed with attribution —
+# see THIRD_PARTY_NOTICES.md (and licenses/APACHE-2.0.txt) in this repo.
+#
 # Usage:
 #   chmod +x download-models.sh
 #   ./download-models.sh           # Download from GitHub Releases (pinned versions)

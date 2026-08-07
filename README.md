@@ -117,7 +117,7 @@ export RAG_KIT_HF_ENDPOINT=https://hf-mirror.com   # China mirror
 | VLM | SmolVLM-256M-Instruct | ~500 MB | ~500 MB |
 | **Total** | | **~1.1 GB** | **~1.5 GB (< 2 GB)** |
 
-> Model weights are version-locked: `scripts/download-models.*` fetch pinned tarballs from the **v0.1.0** release, independent of the app version. They are only re-uploaded when the model set itself changes.
+> Model weights are version-locked: `scripts/download-models.*` fetch pinned tarballs from the **v0.1.0** release, independent of the app version. They are only re-uploaded when the model set itself changes. All bundled weights are Apache-2.0 and re-distributed with attribution — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Hermes Agent Integration
 
