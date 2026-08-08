@@ -312,7 +312,7 @@ def _extract_pages(
     elif ext == ".pptx":
         return _extract_pptx(path)
     elif ext in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
-        return _extract_image(path, languages)
+        return _extract_image(path, languages, use_vlm=use_vlm)
     elif ext in (".txt", ".md"):
         return _extract_text_file(path, ext)
     else:
@@ -587,8 +587,37 @@ def _extract_pptx(path: Path) -> list[_Page]:
 # --------------------------------------------------------------------------- #
 
 
-def _extract_image(path: Path, languages: list[str]) -> list[_Page]:
-    """Extract text from a raster image file via OCR."""
+def _vlm_standalone_image(image: Any, languages: list[str]) -> str:
+    """Caption a standalone raster image with the VLM; '' on any failure."""
+    try:
+        import io
+
+        from PIL import Image as _PILImage
+
+        from rag_kit.vlm import VLMCaptioner
+
+        captioner = VLMCaptioner()
+        if not captioner.is_available():
+            logger.debug("VLM model not available, skipping standalone image caption")
+            return ""
+        img = image if isinstance(image, _PILImage.Image) else _PILImage.open(image)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        language = "zh" if "zh" in languages else "en"
+        return captioner.caption_image(buf.getvalue(), page_num=0, language=language)
+    except Exception as exc:
+        logger.debug("VLM standalone image caption failed: %s", exc)
+        return ""
+
+
+def _extract_image(
+    path: Path,
+    languages: list[str],
+    use_vlm: bool = False,
+) -> list[_Page]:
+    """Extract text from a raster image — OCR, else VLM captioning."""
     try:
         from PIL import Image
     except ImportError:
@@ -601,11 +630,24 @@ def _extract_image(path: Path, languages: list[str]) -> list[_Page]:
         image.close()
 
     text = ocr_image(img, languages=languages)
-    if not text.strip():
-        return []
-    return [
-        _Page(text=_normalize_text(text), page_num=0, section="", extraction_method="ocr")
-    ]
+    if text.strip():
+        return [
+            _Page(text=_normalize_text(text), page_num=0, section="", extraction_method="ocr")
+        ]
+
+    # No OCR-able text (e.g. a pure chart/diagram): fall back to VLM captioning.
+    if use_vlm:
+        caption = _vlm_standalone_image(img, languages)
+        if caption.strip():
+            return [
+                _Page(
+                    text=_normalize_text(caption),
+                    page_num=0,
+                    section="",
+                    extraction_method="vlm",
+                )
+            ]
+    return []
 
 
 # --------------------------------------------------------------------------- #

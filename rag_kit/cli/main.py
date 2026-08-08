@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import typer
 
@@ -131,7 +131,9 @@ def ingest(
     path: str = typer.Argument(..., help="File or folder to ingest."),
     json_output: bool = typer.Option(False, "--json", help="Output JSON for agent consumption."),
     ocr: bool = typer.Option(True, "--ocr/--no-ocr", help="Enable/disable OCR for scanned PDFs."),
-    vlm: bool = typer.Option(False, "--vlm/--no-vlm", help="Enable/disable VLM for visual content."),
+    vlm: Optional[bool] = typer.Option(
+        None, "--vlm/--no-vlm", help="Enable/disable VLM for visual content (default: from config)."
+    ),
 ) -> None:
     """Ingest a file or folder into the vector DB.
 
@@ -141,6 +143,8 @@ def ingest(
     For a folder, all supported files inside are ingested recursively.
     """
     config = _ensure_config()
+    if vlm is None:  # not explicitly set → honor config (vlm_enabled)
+        vlm = bool(getattr(config, "vlm_enabled", True))
     source = Path(path)
 
     if not source.exists():

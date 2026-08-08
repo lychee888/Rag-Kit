@@ -99,45 +99,31 @@ def _load_vlm_pytorch(
 
     processor = AutoProcessor.from_pretrained(load_path)
 
-    # SmolVLM uses AutoModelForImageTextToText in transformers >= 4.46
-    # Fall back to AutoModelForVision2Seq for older versions
+    # SmolVLM uses AutoModelForImageTextToText (transformers >= 4.46 / 5.x).
+    # transformers 5.x uses ``dtype`` (``torch_dtype`` is deprecated);
+    # AutoModelForVision2Seq was REMOVED in 5.x, so only use the former.
     model = None
-
-    try:
-        from transformers import AutoModelForImageTextToText
-        # Try with device_map (requires accelerate) for flexible device placement
+    last_err: Exception | None = None
+    from transformers import AutoModelForImageTextToText
+    for kwargs in (
+        {"dtype": torch.float32},
+        {"torch_dtype": torch.float32},
+        {"dtype": torch.float32, "trust_remote_code": True},
+    ):
         try:
-            model = AutoModelForImageTextToText.from_pretrained(
-                load_path,
-                dtype=torch.float32,
-                device_map="cpu",
-            )
-        except (ImportError, RuntimeError):
-            # Fallback: load without device_map, move to CPU manually
-            model = AutoModelForImageTextToText.from_pretrained(
-                load_path,
-                torch_dtype=torch.float32,
-            )
-            model = model.to("cpu")
-        logger.info("VLM loaded via AutoModelForImageTextToText")
-    except (ImportError, ValueError, OSError) as e:
-        logger.debug("AutoModelForImageTextToText failed: %s", e)
-        try:
-            from transformers import AutoModelForVision2Seq
-            model = AutoModelForVision2Seq.from_pretrained(
-                load_path,
-                torch_dtype=torch.float32,
-            )
-            model = model.to("cpu")
-            logger.info("VLM loaded via AutoModelForVision2Seq")
-        except Exception as e2:
-            logger.debug("AutoModelForVision2Seq failed: %s", e2)
+            model = AutoModelForImageTextToText.from_pretrained(load_path, **kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001 - try next fallback
+            last_err = exc
+            logger.debug("AutoModelForImageTextToText attempt failed: %s", exc)
 
     if model is None:
         raise RuntimeError(
-            f"Could not load VLM model {model_name} via any model class. "
-            f"Ensure transformers>=4.46 and the model is available."
+            f"Could not load VLM model {model_name} via AutoModelForImageTextToText. "
+            f"Last error: {last_err}. Ensure transformers>=4.46 and the model is "
+            "available (pip install -e '.[ocr]')."
         )
+    model = model.to("cpu")
 
     # Move to GPU if available
     if torch.cuda.is_available():
