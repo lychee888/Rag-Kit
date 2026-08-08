@@ -254,9 +254,9 @@ echo   (embedding ~470 MB + EasyOCR ~100 MB; VLM ~330 MB optional)
 echo ============================================================
 set /p DL_MODELS="Pre-download pinned models now (from GitHub Releases)? [y/N]: "
 if /i "!DL_MODELS!"=="y" (
-    REM Non-interactive: skip VLM here (see scripts\download-models.bat to add it later).
+    REM Download embedding + EasyOCR + SmolVLM so VLM captioning works out of the box.
     set "MODEL_DIR=%USERPROFILE%\models"
-    set "SKIP_VLM=1"
+    set "SKIP_VLM=0"
     set "RAG_KIT_BATCH=1"
     call "%SCRIPT_DIR%download-models.bat"
    )

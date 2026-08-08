@@ -268,7 +268,8 @@ if [ -t 0 ]; then
     read -r -p "Pre-download pinned models now (from GitHub Releases)? [y/N]: " DL_MODELS || true
 fi
 if [ "$DL_MODELS" = "y" ] || [ "$DL_MODELS" = "Y" ]; then
-    MODEL_DIR="$HOME/models" SKIP_VLM=1 bash "$SCRIPT_DIR/download-models.sh" || true
+    # Include SmolVLM so VLM chart/image captioning works out of the box.
+    MODEL_DIR="$HOME/models" SKIP_VLM=0 bash "$SCRIPT_DIR/download-models.sh" || true
 fi
 
 SKILL_SRC="$PROJECT_DIR/SKILL.md"
