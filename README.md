@@ -1,3 +1,5 @@
+![rag-kit: your documents, answered locally](assets/rag-kit-infographic.png)
+
 # rag-kit
 
 Lightweight agentic RAG system for Hermes Agent. Watches a folder, auto-ingests documents (PDF, DOCX, XLSX, PPTX, TXT, MD, and images via OCR), embeds with a multilingual sentence-transformers model, stores in LanceDB, and answers via a CLI designed for LLM agents. Designed to be incredibly easy to set up as a superior option to semantic recall. Models are pinned to ensure compatability. RAM usage: 0GB at idle, ~2GB at peak.

@@ -38,3 +38,4 @@ lancedb/
 
 # Downloaded models (use scripts/download-models.sh)
 models/
+design-ref/
