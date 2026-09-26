@@ -50,8 +50,8 @@ rag = "rag_kit.cli.main:app"
 rag-kit = "rag_kit.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/jarvis959/Rag-Kit"
-Repository = "https://github.com/jarvis959/Rag-Kit"
+Homepage = "https://github.com/lychee888/Rag-Kit"
+Repository = "https://github.com/lychee888/Rag-Kit"
 
 [tool.setuptools.packages.find]
 where = ["."]

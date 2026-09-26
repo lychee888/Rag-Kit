@@ -23,7 +23,7 @@ NC='\033[0m'
 # ---- Config ----
 MODEL_DIR="${MODEL_DIR:-$HOME/models}"
 RELEASE_TAG="v0.1.0"
-RELEASE_BASE="https://github.com/jarvis959/Rag-Kit/releases/download/${RELEASE_TAG}"
+RELEASE_BASE="https://github.com/lychee888/Rag-Kit/releases/download/${RELEASE_TAG}"
 
 # ---- Parse args ----
 SOURCE="github"

@@ -16,7 +16,7 @@ success = []
 failed = []
 
 RELEASE_TAG = "v0.1.0"
-RELEASE_BASE = f"https://github.com/jarvis959/Rag-Kit/releases/download/{RELEASE_TAG}"
+RELEASE_BASE = f"https://github.com/lychee888/Rag-Kit/releases/download/{RELEASE_TAG}"
 
 MIN_SIZES = {
     "embedding-model.tar.gz": 400_000_000,

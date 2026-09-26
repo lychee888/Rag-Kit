@@ -303,7 +303,7 @@ echo ============================================================
 echo   Installation FAILED
 echo ============================================================
 echo   Please check the errors above and try again.
-echo   For help: https://github.com/jarvis959/Rag-Kit
+echo   For help: https://github.com/lychee888/Rag-Kit
 echo.
 pause
 exit /b 1
