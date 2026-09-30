@@ -34,6 +34,7 @@ def _rag_kit(*args: str, **kwargs) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "rag_kit.cli.main", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
         env=env,
         **kwargs,

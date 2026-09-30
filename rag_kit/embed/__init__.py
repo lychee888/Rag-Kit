@@ -193,29 +193,38 @@ def chunk_text(
 # --------------------------------------------------------------------------- #
 
 
-def _model_is_cached(model_name: str, cache_dir: str) -> bool:
-    """Return True if *model_name* is already downloaded into *cache_dir*.
+def _resolve_cached_model(model_name: str, cache_dir: str) -> str | None:
+    """Resolve a complete sentence-transformers model in a local cache.
 
     Checks both the flat folder (``cache_dir/<name>``) and the standard
     HuggingFace hub layout (``cache_dir/models--org--name/snapshots/...``).
-    This decides whether we may enable offline mode.
+    Short names use the sentence-transformers namespace. The resolved path
+    is passed directly to the loader so cached models need no Hub requests.
     """
     from pathlib import Path
 
     base = Path(cache_dir)
     # 1. Flat directory: cache_dir/model_name with config.json (or safetensors)
-    flat = base / model_name
-    if (flat / "model.safetensors").exists() or (flat / "pytorch_model.bin").exists() \
-            or (flat / "config.json").exists():
-        return True
+    model_id = model_name if "/" in model_name else f"sentence-transformers/{model_name}"
+    candidates = [Path(model_name).expanduser(), base / model_name, base / model_id]
     # 2. HF hub layout: cache_dir/models--org--name/snapshots/<sha>/config.json
-    org, _, name = model_name.partition("/")
+    org, _, name = model_id.partition("/")
     hub = base / f"models--{org}--{name}" / "snapshots"
     if hub.exists():
-        for snapshot in hub.iterdir():
-            if (snapshot / "config.json").exists():  # coarse; weights may still be partial
-                return True
-    return False
+        ref = hub.parent / "refs" / "main"
+        if ref.is_file():
+            candidates.append(hub / ref.read_text().strip())
+        candidates.extend(sorted(hub.iterdir(), key=lambda p: p.name))
+    for path in candidates:
+        if ((path / "config.json").is_file() and (path / "modules.json").is_file()
+                and (path / "tokenizer.json").is_file()
+                and any((path / f).is_file() for f in ("model.safetensors", "pytorch_model.bin"))):
+            return str(path.resolve())
+    return None
+
+
+def _model_is_cached(model_name: str, cache_dir: str) -> bool:
+    return _resolve_cached_model(model_name, cache_dir) is not None
 
 
 class EmbeddingEngine:
@@ -258,13 +267,16 @@ class EmbeddingEngine:
 
         # Set cache directory if configured.
         cache_kwargs: dict[str, Any] = {}
+        load_path = self.model_name
         if self.model_dir:
             os.makedirs(self.model_dir, exist_ok=True)
             cache_kwargs["cache_folder"] = self.model_dir
             # Go offline ONLY if the model is already present in the cache dir.
             # Otherwise we stay online so the model can download on first run.
-            if _model_is_cached(self.model_name, self.model_dir):
-                os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            cached = _resolve_cached_model(self.model_name, self.model_dir)
+            if cached:
+                load_path = cached
+                cache_kwargs["local_files_only"] = True
 
         try:
             from sentence_transformers import SentenceTransformer
@@ -278,7 +290,7 @@ class EmbeddingEngine:
                 '  pip install -e ".[ocr]"'
             ) from exc
 
-        self._model = SentenceTransformer(self.model_name, **cache_kwargs)
+        self._model = SentenceTransformer(load_path, **cache_kwargs)
         return self._model
 
     # -- public API --------------------------------------------------------- #

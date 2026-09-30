@@ -37,6 +37,7 @@ def _rag_kit(*args: str, **kwargs) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "rag_kit.cli.main", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
         env=env,
         **kwargs,
@@ -324,19 +325,19 @@ class TestCLI:
         # Init config first so the file exists, then set a value
         r = subprocess.run(
             [sys.executable, "-m", "rag_kit.cli.main", "config", "init", "--path", str(config_p)],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
             env=env,
         )
         assert config_p.exists(), f"Config init failed: {r.stderr}"
         r = subprocess.run(
             [sys.executable, "-m", "rag_kit.cli.main", "config", "set", "chunk_size", "256"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
             env=env,
         )
         assert r.returncode == 0, r.stderr
         r = subprocess.run(
             [sys.executable, "-m", "rag_kit.cli.main", "config"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
             env=env,
         )
         assert r.returncode == 0, r.stderr

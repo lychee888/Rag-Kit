@@ -13,6 +13,7 @@ LanceDB is chosen over ChromaDB because:
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -86,43 +87,34 @@ class VectorStore:
 
         import lancedb
 
-        self._db = lancedb.connect(self.db_path)
+        # Watchers and CLI processes share this database. Refresh cached
+        # table versions before reads so long-lived readers see new commits.
+        self._db = lancedb.connect(self.db_path, read_consistency_interval=timedelta(0))
         return self._db
 
     def _ensure_table(self) -> Any:
         """Open or create the documents table.
 
-        If the table exists but lacks the expected columns (vlm_generated,
-        source_type), it is dropped and recreated — those were added after
-        the initial scaffold.
+        Missing metadata columns are added with defaults, preserving rows.
         """
-        if self._table is not None:
-            return self._table
-
         db = self._connect()
 
         if self.table_name in db.table_names():
             existing = db.open_table(self.table_name)
             existing_cols = set(existing.schema.names)
-            required = {"vlm_generated", "source_type"}
-            if not required.issubset(existing_cols):
-                import logging
-                _logger = logging.getLogger(__name__)
-                _logger.info(
-                    "Table %r is missing columns %s; dropping and recreating.",
-                    self.table_name,
-                    required - existing_cols,
-                )
-                db.drop_table(self.table_name)
-            else:
-                self._table = existing
-                return self._table
+            defaults = {"vlm_generated": "false", "source_type": "'text'"}
+            missing = {k: v for k, v in defaults.items() if k not in existing_cols}
+            if missing:
+                existing.add_columns(missing)
+            self._table = existing
+            self.dim = existing.schema.field("vector").type.list_size
+            return self._table
 
         schema = _make_schema(self.dim)
         self._table = db.create_table(
             self.table_name,
             schema=schema,
-            mode="overwrite",
+            mode="create",
         )
         return self._table
 
@@ -135,7 +127,14 @@ class VectorStore:
                 f"Add chunks first via add_chunks()."
             )
         if self._table is None:
-            self._table = db.open_table(self.table_name)
+            try:
+                self._table = db.open_table(self.table_name)
+            except ValueError as exc:
+                # A concurrent first ingest can create the table directory
+                # before its initial manifest is committed.
+                if "was not found" in str(exc):
+                    raise RuntimeError(f"Table '{self.table_name}' is not ready yet") from exc
+                raise
         return self._table
 
     # -- public API: write -------------------------------------------------- #
@@ -187,6 +186,43 @@ class VectorStore:
             )
 
         table.add(rows)
+        self._fts_ready = False
+        return len(rows)
+
+    def replace_source(self, source: str, chunks: list[dict[str, Any]],
+                       vectors: np.ndarray) -> int:
+        """Atomically replace one source after extraction and embedding succeed.
+
+        Merge-insert commits insertion and deletion together. An empty valid
+        document is a single source-scoped delete. Failed validation never
+        removes the previous document.
+        """
+        if any(c.get("source") != source for c in chunks):
+            raise ValueError("All replacement chunks must belong to the source")
+        vectors = np.asarray(vectors, dtype=np.float32)
+        if chunks and (vectors.ndim != 2 or vectors.shape[0] != len(chunks)):
+            raise ValueError("Replacement vectors must match the chunk count")
+        if not chunks:
+            if self.count_rows():
+                self.delete_by_source(source)
+            return 0
+        self.dim = vectors.shape[1]
+        table = self._ensure_table()
+        if table.schema.field("vector").type.list_size != vectors.shape[1]:
+            raise ValueError("Embedding dimension differs from the existing index; use a new database")
+        rows = [{
+            "id": str(c.get("id", c.get("chunk_id", ""))),
+            "text": c["text"], "vector": vectors[i].tolist(), "source": source,
+            "page": int(c.get("page", 0)), "chunk_idx": int(c.get("chunk_idx", i)),
+            "vlm_generated": bool(c.get("vlm_generated", False)),
+            "source_type": str(c.get("source_type", "text")),
+        } for i, c in enumerate(chunks)]
+        safe_source = source.replace("'", "''")
+        (table.merge_insert("id").when_matched_update_all()
+         .when_not_matched_insert_all()
+         .when_not_matched_by_source_delete(f"source = '{safe_source}'")
+         .execute(pa.Table.from_pylist(rows, schema=table.schema)))
+        self._fts_ready = False
         return len(rows)
 
     # -- public API: search ------------------------------------------------- #
@@ -265,7 +301,7 @@ class VectorStore:
         try:
             try:
                 from lancedb.index import FTS
-                table.create_index(column="text", config=FTS(), replace=True)
+                table.create_index("text", config=FTS(), replace=True)
             except Exception:
                 table.create_fts_index("text", replace=True)
             self._fts_ready = True
@@ -291,53 +327,41 @@ class VectorStore:
 
         Returns the same result shape as :meth:`search`.
         """
-        self._ensure_fts()
-        table = self._get_table()
-
-        query_vec = np.asarray(query_vector, dtype=np.float32).tolist()
         alpha = min(max(alpha, 0.0), 1.0)
 
         # vector-only shortcut
         if alpha >= 1.0:
             return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
-        # keyword-only shortcut (FTS raw = relevance as score)
-        if alpha <= 0.0:
-            q = table.search(query_text, query_type="fts").limit(top_k)
+        self._ensure_fts()
+        table = self._get_table()
+        candidate_count = max(top_k * 4, 20)
+        try:
+            q = table.search(query_text, query_type="fts").limit(candidate_count)
             if filter_sql:
                 q = q.where(filter_sql)
-            rows = q.to_list()
-            for row in rows:
-                row["score"] = round(row.get("score", row.get("_score", 0.0)), 4)
-            return rows
-
-        try:
-            from lancedb.rerankers import RRFReranker
-        except Exception:
-            return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
-
-        try:
-            q = (
-                table.search(query_type="hybrid")
-                .vector(query_vec)
-                .text(query_text)
-                .rerank(reranker=RRFReranker())
-                .limit(top_k)
-            )
-            if filter_sql:
-                q = q.where(filter_sql)
+            keyword = q.to_list()
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning(
-                "Hybrid search failed (%s); falling back to vector search.", exc
+                "Keyword search failed (%s).", exc
             )
+            if alpha <= 0.0:
+                raise RuntimeError(f"Keyword search unavailable: {exc}") from exc
             return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
-
-        rows = q.to_list()
-        for row in rows:
-            score = row.get("_relevance_score", row.get("score", 0.0))
-            row["score"] = round(float(score), 4)
-            row.pop("_relevance_score", None)
-        return rows
+        if alpha <= 0.0:
+            for row in keyword:
+                row["score"] = round(float(row.get("_score", row.get("score", 0))), 4)
+            return keyword[:top_k]
+        semantic = self.search(query_vector, top_k=candidate_count, filter_sql=filter_sql)
+        fused: dict[str, dict[str, Any]] = {}
+        scores: dict[str, float] = {}
+        for weight, rows in ((alpha, semantic), (1 - alpha, keyword)):
+            for rank, row in enumerate(rows, 1):
+                key = row["id"]
+                fused.setdefault(key, dict(row))
+                scores[key] = scores.get(key, 0.0) + weight / (60 + rank)
+        ordered = sorted(scores, key=lambda k: (-scores[k], k))[:top_k]
+        return [{**fused[k], "score": round(scores[k], 8)} for k in ordered]
 
     # -- public API: delete ------------------------------------------------- #
 
@@ -352,6 +376,7 @@ class VectorStore:
         # Escape single quotes for SQL filter.
         safe_source = source.replace("'", "''")
         table.delete(f"source = '{safe_source}'")
+        self._fts_ready = False
         after = table.count_rows()
         return before - after
 

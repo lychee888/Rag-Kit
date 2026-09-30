@@ -12,74 +12,60 @@ fully-resolved folder path, and store the owning PID.
 from __future__ import annotations
 
 import hashlib
+import errno
 import os
-import sys
 from pathlib import Path
 
 _LOCK_DIR = Path.home() / ".cache" / "rag-kit" / "watcher-locks"
+_HANDLES: dict[Path, object] = {}
 
 
 def lock_path(folder: Path) -> Path:
     """Return the lockfile path for a watched *folder*."""
     _LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha1(str(folder.resolve()).encode()).hexdigest()[:16]
+    digest = hashlib.sha1(os.path.normcase(str(folder.resolve())).encode()).hexdigest()[:16]
     return _LOCK_DIR / f"{digest}.lock"
 
 
-def _pid_alive(pid: int) -> bool:
-    """Best-effort cross-platform liveness check."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
-            if not h:
-                return False
-            ctypes.windll.kernel32.CloseHandle(h)
-            return True
-        except Exception:
-            return True  # can't tell; assume alive
-    # POSIX
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True  # exists (maybe different user)
-    except Exception:
-        return True
-
-
 def acquire(folder: Path) -> Path | None:
-    """Take the lock for *folder*. Returns the lock path, or ``None`` if a
-    live watcher already holds it (stale locks are reclaimed).
+    """Hold an OS lock until release/process exit; None means already owned.
+
+    Files stay in place to avoid inode races. I/O failures raise rather than
+    allowing an unlocked watcher to run.
     """
     lock = lock_path(folder)
-    if lock.exists():
-        try:
-            pid = int(lock.read_text().strip())
-        except (ValueError, OSError):
-            pid = -1
-        if pid > 0 and _pid_alive(pid):
-            return None  # already being watched by a live process
-        try:
-            lock.unlink()  # stale
-        except OSError:
-            pass
+    if lock in _HANDLES:
+        return None
+    handle = open(lock, "a+b")
     try:
-        lock.write_text(str(os.getpid()))
-    except OSError:
-        pass  # lock dir may be read-only; don't block watching on lock failure
+        if lock.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            return None
+        raise
+    try:
+        handle.truncate(0)
+        handle.write(str(os.getpid()).encode())
+        handle.flush()
+        _HANDLES[lock] = handle
+    except Exception:
+        handle.close()
+        raise
     return lock
 
 
 def release(lock: Path | None) -> None:
     """Release the lock if we still own it."""
-    if lock is None:
-        return
-    try:
-        if lock.exists() and lock.read_text().strip() == str(os.getpid()):
-            lock.unlink()
-    except OSError:
-        pass
+    handle = _HANDLES.pop(lock, None)
+    if handle is not None:
+        handle.close()

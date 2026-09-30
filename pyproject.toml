@@ -31,7 +31,7 @@ dependencies = [
     "pymupdf>=1.24",
     "python-docx>=1.1",
     "sentence-transformers>=3.0",
-    "lancedb>=0.6",
+    "lancedb>=0.25",
     "transformers>=4.54,<6",
     "tokenizers>=0.22.0,<0.23.1",
     "pillow>=10.0",
@@ -46,8 +46,8 @@ vlm = ["optimum[onnxruntime]>=1.20"]  # optional ONNX fallback for VLM (PyTorch 
 dev = ["pytest>=7.0", "pytest-cov"]
 
 [project.scripts]
-rag = "rag_kit.cli.main:app"
-rag-kit = "rag_kit.cli.main:app"
+rag = "rag_kit.cli.main:run_cli"
+rag-kit = "rag_kit.cli.main:run_cli"
 
 [project.urls]
 Homepage = "https://github.com/lychee888/Rag-Kit"

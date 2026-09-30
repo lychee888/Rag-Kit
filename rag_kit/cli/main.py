@@ -143,88 +143,46 @@ def ingest(
     For a folder, all supported files inside are ingested recursively.
     """
     config = _ensure_config()
-    if vlm is None:  # not explicitly set → honor config (vlm_enabled)
-        vlm = bool(getattr(config, "vlm_enabled", True))
-    source = Path(path)
-
-    if not source.exists():
-        typer.echo(f"Error: path does not exist: {path}", err=True)
-        raise typer.Exit(code=1)
-
+    if vlm is None:
+        vlm = config.vlm_enabled
+    source = Path(path).expanduser().resolve()
+    start = time.monotonic()
     store = create_store_from_config(config)
     engine = create_engine_from_config(config)
-
-    start = time.monotonic()
-
-    if source.is_file():
-        typer.echo(f"Ingesting file: {source}")
-        try:
-            chunks = ingest_file(
-                source,
-                chunk_size=config.chunk_size,
-                chunk_overlap=config.chunk_overlap,
-                languages=config.languages,
-                use_ocr=ocr,
-                use_vlm=vlm,
-            )
-        except Exception as exc:
-            typer.echo(f"Error ingesting {source}: {exc}", err=True)
-            raise typer.Exit(code=1)
-    elif source.is_dir():
-        typer.echo(f"Ingesting folder: {source}")
-        chunks = ingest_folder(
-            source,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            languages=config.languages,
-            use_ocr=ocr,
-            use_vlm=vlm,
-        )
+    errors = []
+    added = 0
+    if not source.exists():
+        files = []
+        errors.append({"file": str(source), "error": "Path does not exist"})
+    elif source.is_file():
+        files = [source]
     else:
-        typer.echo(f"Error: {path} is neither a file nor a folder", err=True)
-        raise typer.Exit(code=1)
-
-    if not chunks:
-        typer.echo("No content extracted — nothing to ingest.")
-        raise typer.Exit(code=0)
-
-    # Map chunk dicts from ingest pipeline to store-compatible format.
-    store_chunks: list[dict[str, Any]] = []
-    for i, c in enumerate(chunks):
-        store_chunks.append({
-            "id": c.get("id", c.get("chunk_id", "")),
-            "text": c["text"],
-            "source": c.get("source", c.get("source_file", "")),
-            "page": int(c.get("page", 0)),
-            "chunk_idx": int(c.get("chunk_idx", i)),
-            "vlm_generated": bool(c.get("vlm_generated", False)),
-            "source_type": str(c.get("source_type", "text")),
-        })
-
-    # Embed.
-    typer.echo(f"Embedding {len(store_chunks)} chunks...")
-    texts = [c["text"] for c in store_chunks]
-    vectors = engine.embed_texts(texts)
-
-    # Store.
-    added = store.add_chunks(store_chunks, vectors)
-    elapsed = time.monotonic() - start
-
+        files = sorted(p for p in source.rglob("*") if p.is_file()
+                       and p.suffix.lower() in config.supported_extensions
+                       and p.suffix.lower() in SUPPORTED_EXTENSIONS)
+    for file in files:
+        typer.echo(f"Ingesting file: {file}", err=True)
+        try:
+            chunks = ingest_file(file, chunk_size=config.chunk_size,
+                                 chunk_overlap=config.chunk_overlap,
+                                 languages=config.languages, use_ocr=ocr, use_vlm=vlm)
+            vectors = engine.embed_texts([c["text"] for c in chunks]) if chunks else []
+            added += store.replace_source(str(file), chunks, vectors)
+        except Exception as exc:
+            errors.append({"file": str(file), "error": str(exc)})
     result = {
-        "status": "ok",
-        "path": str(source),
-        "chunks_found": len(chunks),
-        "chunks_stored": added,
-        "elapsed_seconds": round(elapsed, 2),
+        "status": "error" if errors else "ok", "path": str(source),
+        "chunks_found": added, "chunks_stored": added, "errors": errors,
+        "elapsed_seconds": round(time.monotonic() - start, 2),
     }
-
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False))
     else:
-        typer.echo(
-            f"Ingested {len(chunks)} chunks ({added} stored) "
-            f"from {source} in {elapsed:.1f}s"
-        )
+        typer.echo(f"Ingested {added} chunks from {source}")
+        for error in errors:
+            typer.echo(f"Error ingesting {error['file']}: {error['error']}", err=True)
+    if errors:
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -257,12 +215,14 @@ def query_cmd(
 
     query_vec = engine.embed_query(text)
 
+    filter_sql = None
     if source:
-        results = store.search_by_source(query_vec, source=source, top_k=top_k)
-    else:
-        # Hybrid (semantic + keyword) by default, weighted by search_alpha.
-        alpha = float(getattr(config, "search_alpha", 0.5) or 0.5)
-        results = store.search_hybrid(text, query_vec, top_k=top_k, alpha=alpha)
+        source = source if source in store.list_sources() else str(Path(source).expanduser().resolve())
+        safe_source = source.replace("'", "''")
+        filter_sql = f"source = '{safe_source}'"
+    # Use the configured blend even when filtering to one document.
+    results = store.search_hybrid(text, query_vec, top_k=top_k,
+                                  alpha=float(config.search_alpha), filter_sql=filter_sql)
 
     if json_output:
         output = {
@@ -307,8 +267,8 @@ def list_files(
     json_output: bool = typer.Option(False, "--json", help="Output JSON for agent consumption."),
 ) -> None:
     """List all ingested files in the vector DB."""
-    _ensure_config()
-    store = create_store_from_config(get_config())
+    config = _ensure_config()
+    store = create_store_from_config(config)
     sources = store.list_sources()
 
     if not sources:
@@ -346,7 +306,11 @@ def delete(
 
     # 1. Try exact match on resolved path, then basename, then any stored
     #    source whose file name matches (handles full paths and bare names).
-    targets = [str(Path(file_path).resolve())]
+    targets = [str(Path(file_path).expanduser().resolve()), file_path]
+    # Older CLI imports stored relative paths. Match only identities whose
+    # resolution equals this exact file; never guess a VLM basename owner.
+    targets += [s for s in store.list_sources() if not Path(s).is_absolute()
+                and str(Path(s).resolve()) == targets[0]]
     if Path(file_path).name == file_path:
         # Bare filename: match against stored sources by basename.
         try:
@@ -535,9 +499,11 @@ class _WatchHandler:
 
         self._handler = _DebouncedEventHandler(self._on_event)
         self._config = config
+        self._root = Path(config.watch_folder).expanduser().resolve()
         self._debounce = debounce_seconds
         self._json = json_output
         self._pending_events: dict[str, float] = {}  # path -> last event time
+        self._pending_trees: set[str] = set()
         self._pending_deletes: set[str] = set()      # resolved abs paths to remove
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -551,19 +517,54 @@ class _WatchHandler:
         return self._handler
 
     def _on_event(self, event_type: str, file_path: str) -> None:
-        ext = Path(file_path).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if event_type in ("tree_created", "created_or_modified"):
+            if not Path(file_path).resolve().is_relative_to(self._root):
+                return
+        if event_type == "tree_created":
+            folder = Path(file_path)
+            if folder.is_dir():
+                for path in folder.rglob("*"):
+                    if path.is_file():
+                        self._on_event("created_or_modified", str(path))
             return
         with self._lock:
-            if event_type == "deleted":
-                # Deletes are handled immediately (no debounce) so that
-                # removed files drop out of search right away. Keep them in
-                # a separate set — never touch _pending_events for deletes.
+            if event_type == "tree_deleted":
+                self._pending_trees.add(str(Path(file_path).resolve()))
+            elif event_type == "deleted":
                 self._pending_deletes.add(str(Path(file_path).resolve()))
+                self._pending_events.pop(file_path, None)
+            elif Path(file_path).suffix.lower() not in self._config.supported_extensions:
+                return
             else:
                 self._pending_events[file_path] = time.monotonic()
-        # wake the worker immediately for deletes
         self._resume.set()
+
+    def reconcile(self, folder: Path) -> None:
+        """Backfill changes missed during downtime without touching other roots."""
+        self._root = folder.resolve()
+        files = [p for p in folder.rglob("*") if p.is_file()]
+        store = create_store_from_config(self._config)
+        for source in store.list_sources():
+            path = Path(source)
+            if (path.is_absolute() and path.is_relative_to(folder)
+                    and (not path.exists() or path.suffix.lower() not in self._config.supported_extensions)):
+                self._on_event("deleted", source)
+        for file in files:
+            self._on_event("created_or_modified", str(file))
+
+    def _drain_deletes(self) -> None:
+        with self._lock:
+            deletes = list(self._pending_deletes)
+            trees = list(self._pending_trees)
+            self._pending_deletes.clear()
+            self._pending_trees.clear()
+        store = create_store_from_config(self._config)
+        for tree in trees:
+            for source in store.list_sources():
+                if Path(source).is_absolute() and Path(source).is_relative_to(Path(tree)):
+                    deletes.append(source)
+        for source in set(deletes):
+            self._delete_one(source)
 
     def start_worker(self) -> None:
         self._worker = threading.Thread(target=self._process_loop, daemon=True)
@@ -573,14 +574,7 @@ class _WatchHandler:
         """Background thread: process deletes immediately, ingest stable files."""
         _CLI_LOGGER.info("Watcher worker started")
         while not self._stop.wait(timeout=0.5):
-            # 1. Handle pending deletes first (immediate).
-            deletes: list[str] = []
-            with self._lock:
-                if self._pending_deletes:
-                    deletes = list(self._pending_deletes)
-                    self._pending_deletes.clear()
-            for abs_path in deletes:
-                self._delete_one(abs_path)
+            self._drain_deletes()
 
             # 2. Ingest files that have been stable for the debounce period.
             to_process: list[str] = []
@@ -630,9 +624,6 @@ class _WatchHandler:
             _CLI_LOGGER.error("Failed to ingest %s: %s", file_path, exc)
             return
 
-        if not chunks:
-            _CLI_LOGGER.warning("No content extracted from %s", file_path)
-            return
 
         # Convert to store format.
         store_chunks: list[dict[str, Any]] = []
@@ -651,15 +642,8 @@ class _WatchHandler:
             store = create_store_from_config(self._config)
             engine = create_engine_from_config(self._config)
             texts = [c["text"] for c in store_chunks]
-            vectors = engine.embed_texts(texts)
-            # Replace any previous chunks for this source (re-ingest of a
-            # modified file must not leave stale rows behind). Drop-guard:
-            # on a fresh DB the table doesn't exist yet, which is fine.
-            try:
-                store.delete_by_source(abs_path)
-            except RuntimeError:
-                pass
-            added = store.add_chunks(store_chunks, vectors)
+            vectors = engine.embed_texts(texts) if texts else []
+            added = store.replace_source(abs_path, store_chunks, vectors)
             elapsed = time.monotonic() - start
 
             msg = f"Ingested {file_path}: {len(chunks)} chunks ({added} stored) in {elapsed:.1f}s"
@@ -680,7 +664,9 @@ class _WatchHandler:
         """Process any remaining pending files, then stop the worker."""
         self._stop.set()
         if self._worker and self._worker.is_alive():
-            self._worker.join(timeout=5)
+            self._worker.join()
+
+        self._drain_deletes()
 
         # Process anything still pending.
         with self._lock:
@@ -700,24 +686,15 @@ class _DebouncedEventHandler:
 
     def dispatch(self, event: Any) -> None:
         # watchdog's dispatch method — handle create/modify/move/delete.
-        from watchdog.events import (
-            FileCreatedEvent,
-            FileDeletedEvent,
-            FileModifiedEvent,
-            FileMovedEvent,
-        )
-
-        if isinstance(event, (FileCreatedEvent, FileModifiedEvent)):
-            if not event.is_directory:
-                self._callback("created_or_modified", event.src_path)
-        elif isinstance(event, FileMovedEvent):
-            if not event.is_directory:
-                # Moved TO our folder => ingest at destination; if it came
-                # from inside our folder the destination replaces it anyway.
-                self._callback("created_or_modified", event.dest_path)
-        elif isinstance(event, FileDeletedEvent):
-            if not event.is_directory:
-                self._callback("deleted", event.src_path)
+        directory = bool(event.is_directory)
+        if event.event_type in ("created", "modified"):
+            if not directory or event.event_type == "created":
+                self._callback("tree_created" if directory else "created_or_modified", event.src_path)
+        elif event.event_type == "moved":
+            self._callback("tree_deleted" if directory else "deleted", event.src_path)
+            self._callback("tree_created" if directory else "created_or_modified", event.dest_path)
+        elif event.event_type == "deleted":
+            self._callback("tree_deleted" if directory else "deleted", event.src_path)
 
 
 @app.command()
@@ -738,94 +715,61 @@ def watch(
     Press Ctrl+C to stop gracefully.
     """
     config = _ensure_config()
-
-    folder_path = Path(folder) if folder else Path(config.watch_folder)
+    folder_path = Path(folder or config.watch_folder).expanduser().resolve()
     if not folder_path.is_dir():
-        folder_path = Path(config.watch_folder)
-    if not folder_path.is_dir():
-        typer.echo(f"Error: folder does not exist: {folder_path} — set watch_folder in config first", err=True)
+        if json_output:
+            typer.echo(json.dumps({"event": "error", "error": f"Folder does not exist: {folder_path}"}))
+        else:
+            typer.echo(f"Error: folder does not exist: {folder_path}", err=True)
         raise typer.Exit(code=1)
-
-    # Override config's watch_folder with the CLI argument.
-    config.watch_folder = str(folder_path.resolve())
-
-    # Single-instance guard: if another live watcher already owns this
-    # folder (e.g. started by the installer while autostart kicks in),
-    # exit cleanly instead of double-ingesting.
+    config.watch_folder = str(folder_path)
     from rag_kit import watchlock
     lock = watchlock.acquire(folder_path)
     if lock is None:
-        msg = (f"Another rag watcher is already watching: {folder_path}. "
-               f"Nothing to do.")
         if json_output:
-            typer.echo(json.dumps({"status": "already_running", "message": msg},
-                                  ensure_ascii=False))
+            typer.echo(json.dumps({"status": "already_running", "folder": str(folder_path)}))
         else:
-            typer.echo(msg, err=True)
-        raise typer.Exit(code=0)
-
-    typer.echo(f"Watching: {folder_path}")
-    typer.echo(f"  Extensions: {', '.join(config.supported_extensions)}")
-    typer.echo(f"  Debounce:   {debounce}s")
-    typer.echo(f"  VLM:        {'on' if config.vlm_enabled else 'off'}")
-    typer.echo(f"  OCR:        on")
-    typer.echo()
-    typer.echo("Press Ctrl+C to stop.")
-    typer.echo()
-
-    # Set up watchdog observer.
+            typer.echo(f"Another watcher is watching: {folder_path}", err=True)
+        return
+    observer = None
+    watch_handler = None
+    originals = {}
     try:
         from watchdog.observers import Observer
         from watchdog.observers.polling import PollingObserver
-    except ImportError:
-        typer.echo("Error: watchdog is not installed. Run: pip install watchdog", err=True)
-        raise typer.Exit(code=1)
-
-    watch_handler = _WatchHandler(config, debounce_seconds=debounce, json_output=json_output)
-
-    observer_cls = PollingObserver if poll else Observer
-    observer = observer_cls()
-    observer.schedule(watch_handler.handler, str(folder_path), recursive=True)
-
-    # Start observer and worker.
-    observer.start()
-    watch_handler.start_worker()
-
-    # Graceful shutdown on SIGINT (Ctrl+C) and SIGTERM.
-    shutdown_flag = threading.Event()
-
-    def _on_shutdown(signum: int, frame: Any) -> None:
-        typer.echo("\nShutting down... (press Ctrl+C again to force)")
-        shutdown_flag.set()
-
-    original_sigint = signal.signal(signal.SIGINT, _on_shutdown)
-    # SIGTERM may not exist on Windows — handle gracefully.
-    try:
-        original_sigterm = signal.signal(signal.SIGTERM, _on_shutdown)
-    except (AttributeError, ValueError):
-        original_sigterm = None
-
-    try:
-        # Block until shutdown is requested.
-        shutdown_flag.wait()
+        watch_handler = _WatchHandler(config, debounce_seconds=debounce, json_output=json_output)
+        observer = (PollingObserver if poll else Observer)()
+        observer.schedule(watch_handler.handler, str(folder_path), recursive=True)
+        shutdown = threading.Event()
+        def on_shutdown(signum, frame):
+            shutdown.set()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            originals[sig] = signal.signal(sig, on_shutdown)
+        # Observe before scanning, then start the worker after backfill queues.
+        observer.start()
+        watch_handler.reconcile(folder_path)
+        watch_handler.start_worker()
+        if json_output:
+            typer.echo(json.dumps({"event": "watching", "folder": str(folder_path)}))
+        else:
+            typer.echo(f"Watching: {folder_path}. Press Ctrl+C to stop.", err=True)
+        shutdown.wait()
     finally:
-        signal.signal(signal.SIGINT, original_sigint)
-        if original_sigterm is not None:
-            try:
-                signal.signal(signal.SIGTERM, original_sigterm)
-            except (AttributeError, ValueError):
-                pass
-
-    # Flush pending, stop observer, stop worker.
-    typer.echo("Stopping watcher...")
-    watch_handler.flush_and_stop()
-    observer.stop()
-    observer.join(timeout=5)
-
-    # Release the single-instance lock so a later start can pick up.
-    watchlock.release(lock)
-
-    typer.echo("Done.")
+        if observer is not None:
+            observer.stop()
+            if observer.is_alive():
+                observer.join()
+        try:
+            if watch_handler is not None:
+                watch_handler.flush_and_stop()
+        finally:
+            for sig, handler in originals.items():
+                signal.signal(sig, handler)
+            watchlock.release(lock)
+    if json_output:
+        typer.echo(json.dumps({"event": "stopped"}))
+    else:
+        typer.echo("Done.", err=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -889,5 +833,14 @@ def autostart_cmd(
 # Entry point
 # --------------------------------------------------------------------------- #
 
-if __name__ == "__main__":
+def run_cli() -> None:
+    # Configure before Typer parses --help, which bypasses its callback.
+    if os.name == "nt":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     app()
+
+
+if __name__ == "__main__":
+    run_cli()

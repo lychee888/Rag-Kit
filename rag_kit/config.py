@@ -177,9 +177,11 @@ _CONFIG_PATH: Path | None = None
 
 def get_config_path() -> Path:
     """Return the config file path to load, checking several locations."""
+    explicit = os.environ.get("RAG_KIT_CONFIG")
+    if explicit:
+        # An explicit new config must not fall back to the user's existing one.
+        return Path(explicit).expanduser()
     candidates = [
-        # 1. Explicit env var
-        Path(os.environ.get("RAG_KIT_CONFIG", "")) if os.environ.get("RAG_KIT_CONFIG") else None,
         # 2. CWD
         Path.cwd() / "rag-kit.yaml",
         # 3. User home
