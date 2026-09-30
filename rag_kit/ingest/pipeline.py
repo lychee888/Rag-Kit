@@ -59,7 +59,7 @@ def ingest_file(
         {
             "id":                 str  — unique chunk identifier,
             "source_file":        str  — file name (not full path),
-            "page":               int  — page number (0-indexed, 0 for non-paginated),
+            "page":               int  — page number (1-indexed, 0 for non-paginated),
             "section":            str  — section heading or "" if none,
             "text":               str  — chunk text (UTF-8, paragraph-aware),
             "language_detected":  str  — "zh", "en", "zh-en", or "unknown",
@@ -83,7 +83,7 @@ def ingest_file(
         FileNotFoundError: If the file does not exist.
         ValueError: If the file extension is not supported.
     """
-    path = Path(file_path)
+    path = Path(file_path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
@@ -124,8 +124,9 @@ def ingest_file(
                     "section": page.section,
                     "text": chunk.text,
                     "language_detected": lang,
-                    "vlm_generated": False,
-                    "source_type": "text",
+                    "chunk_idx": chunk.chunk_idx,
+                    "vlm_generated": page.extraction_method == "vlm",
+                    "source_type": "image" if page.extraction_method == "vlm" else "text",
                 }
             )
 
@@ -134,7 +135,11 @@ def ingest_file(
         try:
             vlm_chunks = _run_vlm_captioning(str(path), ext, languages)
             for vc in vlm_chunks:
+                vc["source"] = str(path)
                 vc["source_file"] = source_file
+                # The captioner/extractor API uses zero-based page indices.
+                vc["page"] = int(vc.get("page", 0)) + 1
+                vc["chunk_idx"] = len(all_chunks)
                 if "id" not in vc:
                     import uuid
                     vc["id"] = uuid.uuid4().hex[:16]
@@ -354,10 +359,15 @@ def _extract_pdf(
             text = _normalize_text(raw_text)
 
             extraction_method = "text"
+            ocr_error = None
 
             # Step 2: If too little text, try OCR fallback.
             if len(text.strip()) < _MIN_TEXT_PER_PAGE and use_ocr:
-                ocr_text = _ocr_pdf_page(page, languages)
+                try:
+                    ocr_text = _ocr_pdf_page(page, languages)
+                except Exception as exc:
+                    ocr_error = exc
+                    ocr_text = ""
                 if ocr_text.strip():
                     text = ocr_text
                     extraction_method = "ocr"
@@ -368,6 +378,10 @@ def _extract_pdf(
                 if vlm_text.strip():
                     text = vlm_text
                     extraction_method = "vlm"
+
+            if (ocr_error and extraction_method == "text"
+                    and (page.get_images() or page.get_drawings())):
+                raise RuntimeError(f"Could not extract PDF page {page_num}: {ocr_error}") from ocr_error
 
             # Determine section heading from the first non-empty line.
             section = _extract_section_heading(text)
@@ -399,11 +413,9 @@ def _ocr_pdf_page(page: Any, languages: list[str]) -> str:
 
         return ocr_image(image, languages=languages)
     except ImportError:
-        logger.debug("OCR not available (easyocr/pytesseract not installed)")
-        return ""
+        raise
     except Exception as exc:
-        logger.warning("OCR failed on page: %s", exc)
-        return ""
+        raise RuntimeError(f"OCR failed on page: {exc}") from exc
 
 
 def _vlm_pdf_page(page: Any, page_num: int, languages: list[str]) -> str:
@@ -492,8 +504,7 @@ def _extract_xlsx(path: Path) -> list[_Page]:
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
     except ImportError:
-        logger.warning("openpyxl not available — cannot read .xlsx files")
-        return []
+        raise ImportError("openpyxl is required to read .xlsx files")
 
     parts: list[str] = []
     try:
@@ -518,8 +529,7 @@ def _extract_xlsx(path: Path) -> list[_Page]:
         finally:
             wb.close()
     except Exception as exc:
-        logger.warning("Failed to read xlsx %s: %s", path, exc)
-        return []
+        raise ValueError(f"Failed to read xlsx {path}: {exc}") from exc
 
     full_text = _normalize_text("\n".join(parts))
     if not full_text.strip():
@@ -543,8 +553,7 @@ def _extract_pptx(path: Path) -> list[_Page]:
     try:
         from pptx import Presentation
     except ImportError:
-        logger.warning("python-pptx not available — cannot read .pptx files")
-        return []
+        raise ImportError("python-pptx is required to read .pptx files")
 
     pages: list[_Page] = []
     try:
@@ -576,8 +585,7 @@ def _extract_pptx(path: Path) -> list[_Page]:
                     _Page(text=full_text, page_num=idx, section="", extraction_method="text")
                 )
     except Exception as exc:
-        logger.warning("Failed to read pptx %s: %s", path, exc)
-        return []
+        raise ValueError(f"Failed to read pptx {path}: {exc}") from exc
 
     return pages
 
@@ -621,7 +629,7 @@ def _extract_image(
     try:
         from PIL import Image
     except ImportError:
-        return []
+        raise ImportError("Pillow is required to read images")
 
     image = Image.open(str(path))
     try:

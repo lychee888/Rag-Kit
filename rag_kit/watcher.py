@@ -198,12 +198,6 @@ def scan_and_ingest(once: bool = False) -> dict[str, Any]:
                 summary["errors"].append(str(exc))
                 continue
 
-            if not chunks:
-                _logger.info("  No content extracted (skipped)")
-                # Still record the hash so we don't re-scan on every poll.
-                prev_state[abs_path] = _file_md5(Path(abs_path))
-                continue
-
             # Convert to store format.
             store_chunks: list[dict[str, Any]] = []
             for i, c in enumerate(chunks):
@@ -220,8 +214,8 @@ def scan_and_ingest(once: bool = False) -> dict[str, Any]:
             try:
                 eng = _ensure_engine()
                 texts = [c["text"] for c in store_chunks]
-                vectors = eng.embed_texts(texts)
-                added = _ensure_store().add_chunks(store_chunks, vectors)
+                vectors = eng.embed_texts(texts) if texts else []
+                added = _ensure_store().replace_source(abs_path, store_chunks, vectors)
                 _logger.info("  %d chunks stored", added)
             except Exception as exc:
                 _logger.error("  Failed to store %s: %s", abs_path, exc)

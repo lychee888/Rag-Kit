@@ -135,8 +135,12 @@ The installer copies the skill to `~/.hermes/skills/research/rag-kit/SKILL.md`. 
 ```bash
 cd rag-kit
 
-# Run the full suite (66 tests, no model downloads needed)
+# Full suite: CLI integration and VLM tests require locally cached models.
+# Autostart tests change OS startup settings; run those only in a disposable environment.
 python -m pytest tests/ -v
+
+# Storage/extraction regressions: no model downloads or autostart changes.
+python -m pytest tests/test_document_lifecycle.py tests/test_watchlock.py tests/test_new_features.py -q
 
 # Run a specific module
 python -m pytest tests/test_rag_pipeline.py -v   # core pipeline + version check
@@ -209,6 +213,20 @@ rag ingest ~/Documents/rag-ingest
 | Linux (DGX Spark ARM64) | `scripts/install-dgx-spark.sh` | systemd user service |
 
 ## Changelog
+
+### Unreleased — document lifecycle fixes
+
+- Re-importing a document atomically replaces its previous chunks. Empty documents remove previous content; extraction and embedding failures retain it.
+- All text and visual chunks share a resolved source path and consistent page numbering. Windows CLI output uses UTF-8 when captured by agents.
+- An explicit `RAG_KIT_CONFIG` path is respected even before the file exists, so creating a separate config does not edit the user's default config.
+- Watch startup reconciles changes made while stopped. File and directory moves/deletions remove old sources; moves outside the watched folder are not ingested.
+- Watcher ownership uses an OS file lock, released when the process exits. Lock files remain on disk and are safe to reuse.
+- Existing indexes gain missing metadata columns without dropping documents. Changing embedding dimensions requires a separate database.
+- Long-lived database readers see commits from other processes, including watcher updates; queries tolerate a first ingestion that is still creating its table.
+- `search_alpha` weights reciprocal-rank fusion and retains zero for keyword-only search, including source-filtered queries. LanceDB 0.25+ is required for native full-text indexing.
+- Cached sentence-transformers snapshots load directly, including short model names in the standard namespaced Hub cache.
+
+New imports replace sources stored under the same absolute path. Older releases may have left relative paths or basename-only visual chunks; review `rag list-files --json` and remove those obsolete source entries explicitly after re-importing. Basename-only entries cannot be safely assigned to a document when several files share a name.
 
 ### v0.1.1 — RAG overhaul
 
