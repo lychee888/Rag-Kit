@@ -31,6 +31,10 @@ _MIN_DRAWING_AREA_RATIO = 0.03
 _RENDER_DPI = 150
 
 
+class VisualExtractionError(RuntimeError):
+    """Known visual content could not be completely extracted."""
+
+
 @dataclass
 class ImageRegion:
     """A visual region extracted from a document, ready for VLM captioning.
@@ -88,10 +92,23 @@ def extract_images_from_pdf(
 
         # ── Strategy 1: Check for embedded raster images ────────────
         images = page.get_images(full=True)
+        has_image_masks = any(
+            (len(item) > 1 and item[1])
+            or doc.xref_get_key(item[0], 'ImageMask') == ('bool', 'true')
+            or doc.xref_get_key(item[0], 'Mask')[0] != 'null'
+            for item in images)
+        # Inline images have no extractable XObject. They still require a
+        # whole-page render and must not disappear behind a partial fallback.
+        visible_images = page.get_image_info(xrefs=True)
+        has_inline_images = any(not item.get('xref') for item in visible_images)
+        required_xrefs = {item['xref'] for item in visible_images if item.get('xref')}
+        has_annotations = (next(page.annots(), None) is not None
+                           or next(page.widgets(), None) is not None)
         image_rects_by_xref: dict[int, list[Any]] = {}
-
+        total_image_area = sum(
+            max(0, item['bbox'][2] - item['bbox'][0]) * max(0, item['bbox'][3] - item['bbox'][1])
+            for item in visible_images if not item.get('xref'))
         if images:
-            total_image_area = 0.0
             for img_info in images:
                 xref = img_info[0] if len(img_info) > 0 else 0
                 try:
@@ -100,8 +117,8 @@ def extract_images_from_pdf(
                 except (TypeError, ValueError):
                     # Older pymupdf versions: call without xref
                     rects = page.get_image_rects()
-                except Exception:
-                    rects = []
+                except Exception as exc:
+                    raise VisualExtractionError(f"Could not locate PDF image {xref} on page {page_num + 1}") from exc
 
                 if rects:
                     image_rects_by_xref[xref] = rects
@@ -109,36 +126,38 @@ def extract_images_from_pdf(
                         if r and r.width > 0 and r.height > 0:
                             total_image_area += r.width * r.height
 
-            area_ratio = total_image_area / page_area if page_area > 0 else 0
+        area_ratio = total_image_area / page_area
 
-            if area_ratio >= _MIN_IMAGE_AREA_RATIO:
-                has_visual_content = True
+        if area_ratio >= _MIN_IMAGE_AREA_RATIO:
+            has_visual_content = True
 
         # ── Strategy 2: Check for vector drawings (charts/diagrams) ─
-        if not has_visual_content:
-            try:
-                drawings = page.get_drawings()
-                meaningful = [d for d in drawings if d.get("type") in ("f", "s", "fs")]
-                # Flag if enough drawings OR enough area covered
-                draw_area = 0.0
-                for d in drawings:
-                    rect = d.get("rect")
-                    if rect and rect.width > 0 and rect.height > 0:
-                        draw_area += rect.width * rect.height
-                draw_area_ratio = min(draw_area / page_area, 1.0) if page_area > 0 else 0
+        try:
+            drawings = page.get_drawings()
+            meaningful = [d for d in drawings if d.get("type") in ("f", "s", "fs")]
+            # Check vectors even on raster pages: embedded-image fallback
+            # cannot recover a chart that was drawn on top of those images.
+            draw_area = 0.0
+            for d in drawings:
+                rect = d.get("rect")
+                if rect and rect.width > 0 and rect.height > 0:
+                    draw_area += rect.width * rect.height
+            draw_area_ratio = min(draw_area / page_area, 1.0)
 
-                if (len(meaningful) >= _MIN_VECTOR_DRAWINGS or
-                        draw_area_ratio >= _MIN_DRAWING_AREA_RATIO):
+            if (len(meaningful) >= _MIN_VECTOR_DRAWINGS or
+                    draw_area_ratio >= _MIN_DRAWING_AREA_RATIO):
+                if not has_visual_content:
                     has_visual_content = True
                     area_ratio = draw_area_ratio
-            except Exception:
-                pass
+        except Exception as exc:
+            raise VisualExtractionError(f"Could not inspect PDF drawings on page {page_num + 1}") from exc
 
         if not has_visual_content:
             continue
 
         # ── Render the page to PNG for VLM captioning ───────────────
         page_rendered = False
+        render_error = None
         if area_ratio <= max_area_ratio or max_area_ratio >= 1.0:
             try:
                 pix = page.get_pixmap(dpi=render_dpi)
@@ -157,21 +176,26 @@ def extract_images_from_pdf(
                 ))
                 page_rendered = True
             except Exception as e:
+                render_error = e
                 logger.warning("Failed to render page %d: %s", page_num + 1, e)
 
         # Only also extract standalone images if the whole page was NOT
         # rendered — otherwise we'd caption the same content twice.
         if not page_rendered:
+            fallback_images = 0
             for xref, rects in image_rects_by_xref.items():
                 if xref in seen_xrefs:
+                    fallback_images += 1
                     continue
                 for r in rects:
                     if r and r.width > 0 and r.height > 0:
                         img_area = r.width * r.height
                         # Only extract standalone if it covers >10% of the page
-                        if img_area / page_area > 0.10:
+                        if render_error is not None or img_area / page_area > 0.10:
                             try:
                                 extracted = doc.extract_image(xref)
+                                if not extracted or not extracted.get("image"):
+                                    raise VisualExtractionError(f"PDF image {xref} has no image data")
                                 if extracted and "image" in extracted:
                                     regions.append(ImageRegion(
                                         image_bytes=extracted["image"],
@@ -185,12 +209,16 @@ def extract_images_from_pdf(
                                         },
                                     ))
                                     seen_xrefs.add(xref)
+                                    fallback_images += 1
                                     break  # One extraction per xref
                             except Exception as e:
-                                logger.debug(
-                                    "Could not extract image xref %d on page %d: %s",
-                                    xref, page_num + 1, e,
-                                )
+                                raise VisualExtractionError(
+                                    f"Could not extract PDF image {xref} on page {page_num + 1}"
+                                ) from e
+            if render_error is not None and (
+                    drawings or has_inline_images or has_annotations or has_image_masks
+                    or not required_xrefs.issubset(seen_xrefs) or not fallback_images):
+                raise VisualExtractionError(f"Could not recover visual content on PDF page {page_num + 1}") from render_error
 
     return regions
 
@@ -213,8 +241,7 @@ def extract_images_from_docx(file_path: str) -> list[ImageRegion]:
         from docx import Document
         from docx.opc.constants import RELATIONSHIP_TYPE as RT
     except ImportError:
-        logger.warning("python-docx not available — cannot extract DOCX images")
-        return regions
+        raise
 
     try:
         doc = Document(file_path)
@@ -239,9 +266,9 @@ def extract_images_from_docx(file_path: str) -> list[ImageRegion]:
                         },
                     ))
                 except Exception as e:
-                    logger.debug("Failed to extract DOCX image: %s", e)
+                    raise VisualExtractionError(f"Failed to extract DOCX image {rel.rId}") from e
     except Exception as e:
-        logger.error("Failed to open DOCX for image extraction: %s", e)
+        raise VisualExtractionError(f"Incomplete DOCX image extraction: {e}") from e
 
     return regions
 

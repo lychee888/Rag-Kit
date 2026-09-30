@@ -264,7 +264,7 @@ class VLMCaptioner:
             language: "zh" or "en" — determines caption prompt language.
 
         Returns:
-            Caption text string, or empty string on failure.
+            Caption text string. Failures raise so ingestion can preserve rows.
         """
         try:
             from PIL import Image
@@ -343,13 +343,15 @@ class VLMCaptioner:
                 "VLM caption for page %d (%s): %s",
                 page_num + 1, language, caption[:120],
             )
+            if not caption:
+                raise RuntimeError("VLM returned an empty caption")
             return caption
 
         except Exception as e:
             logger.error(
                 "VLM captioning failed for page %d: %s", page_num + 1, e,
             )
-            return ""
+            raise RuntimeError(f"VLM captioning failed on page {page_num + 1}: {e}") from e
 
     def caption_regions(
         self,

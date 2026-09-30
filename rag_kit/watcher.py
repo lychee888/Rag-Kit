@@ -138,7 +138,7 @@ def scan_and_ingest(once: bool = False) -> dict[str, Any]:
         return store
 
     while True:
-        summary: dict[str, Any] = {"new": 0, "changed": 0, "deleted": 0, "errors": []}
+        summary: dict[str, Any] = {"new": 0, "changed": 0, "deleted": 0, "errors": [], "status": "ok"}
 
         # --- Discover files on disk ---
         disk_files: dict[str, str] = {}  # abs_path → md5
@@ -195,6 +195,9 @@ def scan_and_ingest(once: bool = False) -> dict[str, Any]:
                 )
             except Exception as exc:
                 _logger.error("  Failed to ingest %s: %s", abs_path, exc)
+                from rag_kit.ingest.pipeline import IncompleteExtractionError
+                if isinstance(exc, IncompleteExtractionError):
+                    summary["status"] = "partial"
                 summary["errors"].append(str(exc))
                 continue
 
@@ -237,6 +240,8 @@ def scan_and_ingest(once: bool = False) -> dict[str, Any]:
         else:
             _logger.debug("No changes detected")
 
+        if summary["errors"] and summary["status"] == "ok":
+            summary["status"] = "error"
         if once:
             return summary
 
