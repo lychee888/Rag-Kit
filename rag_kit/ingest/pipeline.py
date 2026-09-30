@@ -368,9 +368,15 @@ def _extract_pdf(
 
             extraction_method = "text"
             ocr_error = None
+            # Short native text or a blank separator page needs no model.
+            # get_image_info also sees inline images absent from get_images().
+            needs_visual_fallback = (len(text.strip()) < _MIN_TEXT_PER_PAGE
+                                     and bool(page.get_image_info() or page.get_drawings()
+                                              or next(page.annots(), None) is not None
+                                              or next(page.widgets(), None) is not None))
 
             # Step 2: If too little text, try OCR fallback.
-            if len(text.strip()) < _MIN_TEXT_PER_PAGE and use_ocr:
+            if needs_visual_fallback and use_ocr:
                 try:
                     ocr_text = _ocr_pdf_page(page, languages)
                 except Exception as exc:
@@ -381,14 +387,13 @@ def _extract_pdf(
                     extraction_method = "ocr"
 
             # Step 3: If still empty and VLM is enabled, try captioning.
-            if len(text.strip()) < _MIN_TEXT_PER_PAGE and use_vlm:
+            if needs_visual_fallback and len(text.strip()) < _MIN_TEXT_PER_PAGE and use_vlm:
                 vlm_text = _vlm_pdf_page(page, page_num, languages)
                 if vlm_text.strip():
                     text = vlm_text
                     extraction_method = "vlm"
 
-            if (ocr_error and extraction_method == "text"
-                    and (page.get_images() or page.get_drawings())):
+            if ocr_error and extraction_method == "text" and needs_visual_fallback:
                 raise RuntimeError(f"Could not extract PDF page {page_num}: {ocr_error}") from ocr_error
 
             # Determine section heading from the first non-empty line.

@@ -160,6 +160,8 @@ python -m pytest tests/test_vlm.py -v
 
 Re-ingestion is all-or-nothing for each source. If enabled visual extraction fails or produces incomplete captions, **all previous chunks for that source, including visual chunks, are retained**. Text changes from that attempt are not committed. New sources with incomplete extraction are not stored. CLI JSON reports `status: partial`, nonempty `errors`, and exits with code 1; watcher JSON emits `ingest_failed` with `status: partial` and `source_replaced: false`. Fix model availability and re-ingest. A successfully extracted empty document still removes its previous chunks. Explicitly disabling VLM opts into a text-only replacement.
 
+Visual-region discovery, PDF rendering, and DOCX image-read failures also make extraction incomplete. A failed PDF page render can still succeed when every required visual region is recovered as opaque embedded raster images. Raster recovery cannot substitute for vectors, inline images, masks, annotations, or form widgets. Blank PDF pages and short native text without visual content require no OCR or VLM model. Scanned pages and visible form controls still require successful extraction.
+
 With `search_alpha: 0`, keyword-only queries do not construct or load an embedding model.
 
 ### "ModuleNotFoundError" or import errors
