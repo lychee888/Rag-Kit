@@ -16,7 +16,9 @@ chmod +x scripts/install-dgx-spark.sh && ./scripts/install-dgx-spark.sh
 
 That's it. The installer creates a venv at `~/rag-kit-venv/`, installs everything, starts the watcher, and optionally sets up autostart.
 
-## Offline Installation
+## Offline model files
+
+These steps transfer model weights only. A fresh installation still needs internet access for Python dependencies (including PyTorch); the installers do not bundle a wheelhouse. Install dependencies online before moving to an offline machine, or prepare a platform-compatible dependency bundle separately.
 
 1. Download models first (on a machine with internet):
    ```bash
@@ -27,7 +29,7 @@ That's it. The installer creates a venv at `~/rag-kit-venv/`, installs everythin
    chmod +x scripts/download-models.sh && ./scripts/download-models.sh
    ```
 
-2. Copy `~/models/` to the target machine, then run the install script — it works fully offline.
+2. Copy `~/models/` to a machine where rag-kit and its Python dependencies are already installed. Cached-model operation can then run offline; copying model files alone does not make installation offline.
 
 ## Features
 
@@ -153,6 +155,12 @@ python -m pytest tests/test_vlm.py -v
 ```
 
 ## Troubleshooting
+
+### Partial visual extraction
+
+Re-ingestion is all-or-nothing for each source. If enabled visual extraction fails or produces incomplete captions, **all previous chunks for that source, including visual chunks, are retained**. Text changes from that attempt are not committed. New sources with incomplete extraction are not stored. CLI JSON reports `status: partial`, nonempty `errors`, and exits with code 1; watcher JSON emits `ingest_failed` with `status: partial` and `source_replaced: false`. Fix model availability and re-ingest. A successfully extracted empty document still removes its previous chunks. Explicitly disabling VLM opts into a text-only replacement.
+
+With `search_alpha: 0`, keyword-only queries do not construct or load an embedding model.
 
 ### "ModuleNotFoundError" or import errors
 ```bash

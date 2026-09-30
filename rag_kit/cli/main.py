@@ -150,6 +150,7 @@ def ingest(
     store = create_store_from_config(config)
     engine = create_engine_from_config(config)
     errors = []
+    incomplete = False
     added = 0
     if not source.exists():
         files = []
@@ -169,9 +170,11 @@ def ingest(
             vectors = engine.embed_texts([c["text"] for c in chunks]) if chunks else []
             added += store.replace_source(str(file), chunks, vectors)
         except Exception as exc:
+            from rag_kit.ingest.pipeline import IncompleteExtractionError
+            incomplete = incomplete or isinstance(exc, IncompleteExtractionError)
             errors.append({"file": str(file), "error": str(exc)})
     result = {
-        "status": "error" if errors else "ok", "path": str(source),
+        "status": ("partial" if incomplete else "error") if errors else "ok", "path": str(source),
         "chunks_found": added, "chunks_stored": added, "errors": errors,
         "elapsed_seconds": round(time.monotonic() - start, 2),
     }
@@ -202,7 +205,6 @@ def query_cmd(
     """
     config = _ensure_config()
     store = create_store_from_config(config)
-    engine = create_engine_from_config(config)
 
     if store.count_rows() == 0:
         msg = "Database is empty. Ingest documents first with: rag-kit ingest <folder>"
@@ -213,7 +215,8 @@ def query_cmd(
             typer.echo(msg)
         raise typer.Exit(code=0)
 
-    query_vec = engine.embed_query(text)
+    query_vec = (create_engine_from_config(config).embed_query(text)
+                 if float(config.search_alpha) > 0 else None)
 
     filter_sql = None
     if source:
@@ -622,6 +625,13 @@ class _WatchHandler:
             )
         except Exception as exc:
             _CLI_LOGGER.error("Failed to ingest %s: %s", file_path, exc)
+            from rag_kit.ingest.pipeline import IncompleteExtractionError
+            if self._json:
+                typer.echo(json.dumps({
+                    "event": "ingest_failed", "file": file_path,
+                    "status": "partial" if isinstance(exc, IncompleteExtractionError) else "error",
+                    "errors": [str(exc)], "source_replaced": False,
+                }, ensure_ascii=False))
             return
 
 

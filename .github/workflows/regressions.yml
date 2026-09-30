@@ -13,10 +13,32 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - name: Install storage and extraction test dependencies
         run: python -m pip install pytest numpy 'lancedb>=0.25' pyarrow typer pyyaml watchdog pillow pymupdf python-docx openpyxl python-pptx
       - name: Test without model downloads or autostart changes
-        run: python -m pytest tests/test_document_lifecycle.py tests/test_watchlock.py tests/test_new_features.py -q
+        run: python -m pytest tests/test_document_lifecycle.py tests/test_watchlock.py tests/test_new_features.py tests/test_review_followups.py -q -rA
+
+  cached-model-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e '.[dev]' 'lancedb==0.25.0'
+      - name: Cache real multilingual embedding model
+        run: python -c "from huggingface_hub import snapshot_download; from pathlib import Path; snapshot_download('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir=str(Path.home() / 'models'), ignore_patterns=['onnx/*', 'openvino/*', '*.h5', '*.ot'])"
+      - name: Full safe suite with cached embeddings
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          PYTHONUTF8: '1'
+        run: python -m pytest -q -rA -k 'not autostart and not TestWatcher'

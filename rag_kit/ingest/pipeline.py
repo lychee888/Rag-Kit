@@ -40,6 +40,10 @@ SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".png"
 _MIN_TEXT_PER_PAGE = 20
 
 
+class IncompleteExtractionError(RuntimeError):
+    """Extraction did not cover the whole source; previous rows must be kept."""
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -145,7 +149,9 @@ def ingest_file(
                     vc["id"] = uuid.uuid4().hex[:16]
                 all_chunks.append(vc)
         except Exception as exc:
-            logger.warning("VLM captioning skipped for %s: %s", source_file, exc)
+            raise IncompleteExtractionError(
+                f"Visual extraction incomplete for {source_file}; previous source retained: {exc}"
+            ) from exc
 
     if not all_chunks:
         logger.warning("No text extracted from %s", path)
@@ -177,10 +183,6 @@ def _run_vlm_captioning(
 
     captioner = VLMCaptioner()
 
-    if not captioner.is_available():
-        logger.info("VLM model not available, skipping visual captioning")
-        return []
-
     # Determine caption language
     language = "zh" if "zh" in languages else "en"
 
@@ -199,8 +201,14 @@ def _run_vlm_captioning(
         logger.info("No visual regions found in %s", file_path)
         return []
 
+    if not captioner.is_available():
+        raise IncompleteExtractionError("VLM model unavailable for visual regions")
+
     logger.info("Found %d visual regions in %s", len(regions), file_path)
-    return captioner.caption_regions(regions, language=language)
+    chunks = captioner.caption_regions(regions, language=language)
+    if len(chunks) != len(regions):
+        raise IncompleteExtractionError("Some visual regions have no caption")
+    return chunks
 
 
 def ingest_folder(
@@ -430,8 +438,7 @@ def _vlm_pdf_page(page: Any, page_num: int, languages: list[str]) -> str:
         language = "zh" if "zh" in languages else "en"
         return captioner.caption_image(img_bytes, page_num=page_num, language=language)
     except Exception as exc:
-        logger.debug("VLM captioning failed: %s", exc)
-        return ""
+        raise IncompleteExtractionError(f"VLM page extraction failed: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -606,8 +613,7 @@ def _vlm_standalone_image(image: Any, languages: list[str]) -> str:
 
         captioner = VLMCaptioner()
         if not captioner.is_available():
-            logger.debug("VLM model not available, skipping standalone image caption")
-            return ""
+            raise IncompleteExtractionError("VLM model unavailable for image")
         img = image if isinstance(image, _PILImage.Image) else _PILImage.open(image)
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -616,8 +622,7 @@ def _vlm_standalone_image(image: Any, languages: list[str]) -> str:
         language = "zh" if "zh" in languages else "en"
         return captioner.caption_image(buf.getvalue(), page_num=0, language=language)
     except Exception as exc:
-        logger.debug("VLM standalone image caption failed: %s", exc)
-        return ""
+        raise IncompleteExtractionError(f"VLM image extraction failed: {exc}") from exc
 
 
 def _extract_image(
