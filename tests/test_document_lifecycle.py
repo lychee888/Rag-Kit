@@ -200,7 +200,17 @@ def test_visual_caption_shares_source_and_page(setup, tmp_path):
     assert {c['page'] for c in chunks} == {1}
     with patch.object(cli, 'ingest_file', return_value=chunks):
         import_doc(p)
-    assert rows(setup)[-1]['vlm_generated']
+    # Identify rows by content, never by scan position: merge_insert may
+    # return rows in any order (observed row-swap across lancedb builds;
+    # a full-table scan has no ordering contract).
+    stored = {r['text']: r for r in rows(setup)}
+    assert set(stored) == {'A sufficiently long textual introduction to a chart.',
+                           'A visual chart'}
+    assert stored['A visual chart']['vlm_generated'] is True
+    assert stored['A visual chart']['source_type'] == 'image'
+    assert stored['A visual chart']['page'] == 1
+    assert stored['A sufficiently long textual introduction to a chart.']['vlm_generated'] is False
+    assert stored['A sufficiently long textual introduction to a chart.']['source_type'] == 'text'
     cli._WatchHandler(setup)._delete_one(str(p))
     assert VectorStore(setup.db_path).count_rows() == 0
 
