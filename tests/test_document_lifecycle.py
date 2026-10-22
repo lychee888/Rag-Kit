@@ -398,10 +398,11 @@ def test_cached_model_uses_complete_namespaced_snapshot(tmp_path, monkeypatch):
 
 
 def test_poll_watcher_replaces_and_clears_empty_file(setup, tmp_path, monkeypatch):
-    from rag_kit import watcher, config, embed
+    from rag_kit import watcher, config, embed, content_state
     monkeypatch.setattr(config, 'get_config', lambda: setup)
     monkeypatch.setattr(embed, 'create_engine_from_config', lambda _: Engine())
-    monkeypatch.setattr(watcher, '_state_path', lambda: tmp_path / 'state.json')
+    monkeypatch.setattr(watcher, '_state_path', lambda folder=None: tmp_path / 'state.json')
+    monkeypatch.setattr(content_state, 'LEGACY_STATE_PATH', tmp_path / 'no-legacy.json')
     p = tmp_path / 'note.txt'
     p.write_text('Old content', encoding='utf-8')
     assert not watcher.scan_and_ingest(once=True)['errors']

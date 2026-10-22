@@ -75,6 +75,16 @@ class VectorStore:
         self.dim = dim
         self._db: Any = None
         self._table: Any = None
+        #: Metadata about the most recent search (audit F3). Keys:
+        #: ``mode`` ("vector"/"hybrid"), ``keyword_status`` ("ok",
+        #: "failed", "index_stale", "not_used", or "not_run"),
+        #: ``degraded`` (bool), and ``keyword_error`` when a leg failed.
+        #: Consumers thresholding on search quality must check
+        #: ``degraded``: hybrid search falls back to vector-only results
+        #: instead of silently losing the keyword capability.
+        self.last_search: dict[str, Any] = {
+            "mode": "none", "keyword_status": "not_run", "degraded": False,
+        }
 
     # -- internal ----------------------------------------------------------- #
 
@@ -265,7 +275,23 @@ class VectorStore:
             row["score"] = round(score, 4)
             results.append(row)
 
+        self.last_search = {
+            "mode": "vector", "keyword_status": "not_used", "degraded": False,
+        }
         return results
+
+    def has_source(self, source: str) -> bool:
+        """Return True if the store currently holds chunks for *source*.
+
+        Cheap filtered count (no full-table scan) used by the watchers to
+        refuse content-hash skips for documents whose rows were deleted.
+        """
+        try:
+            table = self._get_table()
+        except RuntimeError:
+            return False
+        safe_source = source.replace("'", "''")
+        return table.count_rows(f"source = '{safe_source}'") > 0
 
     def search_by_source(
         self,
@@ -285,18 +311,22 @@ class VectorStore:
     _fts_ready = False
     _fts_rows = -1
 
-    def _ensure_fts(self) -> None:
+    def _ensure_fts(self) -> str | None:
         """Create (or refresh) the full-text-search index on the text column.
 
         The index is rebuilt whenever new rows are added, otherwise newly
         ingested documents would be missing from keyword search.
+
+        Returns ``None`` on success or when the index is already current;
+        otherwise the failure message (audit F3: surfaced by callers, never
+        swallowed silently).
         """
         count = self.count_rows()
         if count == 0:
             self._fts_ready = False
-            return
+            return None
         if self._fts_ready and self._fts_rows == count:
-            return
+            return None
         table = self._get_table()
         try:
             try:
@@ -306,9 +336,15 @@ class VectorStore:
                 table.create_fts_index("text", replace=True)
             self._fts_ready = True
             self._fts_rows = count
+            return None
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning("Could not create FTS index: %s", exc)
+            return str(exc)
+
+    # Reciprocal-rank-fusion constant; also used as the normalization base
+    # so hybrid ``score`` stays inside the documented [0, 1] contract.
+    _RRF_K = 60
 
     def search_hybrid(
         self,
@@ -325,16 +361,39 @@ class VectorStore:
         ``alpha`` is the weight on the semantic side (1.0 = vector-only,
         0.0 = keyword-only); default 0.5 blends both.
 
+        Score contract (audit F2): every returned ``score`` is in [0, 1]
+        for every ``alpha``. For ``alpha < 1`` the score is the *normalized
+        RRF fusion confidence* — raw ``weight/(K+rank)`` sums rescaled by
+        the maximum attainable value ``1/(K+1)`` — i.e. 1.0 means rank 1 in
+        every active leg of the blend. Ranking is identical to raw RRF
+        (the transform is monotonic); the raw fused value is available as
+        ``rrf_score``, and for documents that appeared in the semantic leg
+        the underlying cosine similarity is preserved as ``similarity``.
+        Vector-only results (``alpha >= 1`` or keyword degradation) keep
+        ``score`` = cosine similarity in [0, 1].
+
+        Keyword degradation is never silent (audit F3): when the keyword
+        leg fails, results fall back to vector-only and
+        :attr:`last_search` reports ``degraded=True`` with
+        ``keyword_status="failed"``.
+
         Returns the same result shape as :meth:`search`.
         """
         alpha = min(max(alpha, 0.0), 1.0)
 
         # vector-only shortcut
         if alpha >= 1.0:
-            return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
-        self._ensure_fts()
+            results = self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
+            self.last_search = {
+                "mode": "vector", "keyword_status": "not_used", "degraded": False,
+            }
+            return results
+
+        index_error = self._ensure_fts()
         table = self._get_table()
         candidate_count = max(top_k * 4, 20)
+        keyword_error: str | None = None
+        keyword: list[dict[str, Any]] = []
         try:
             q = table.search(query_text, query_type="fts").limit(candidate_count)
             if filter_sql:
@@ -347,21 +406,57 @@ class VectorStore:
             )
             if alpha <= 0.0:
                 raise RuntimeError(f"Keyword search unavailable: {exc}") from exc
-            return self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
+            keyword_error = str(exc)
+
+        def _meta(status: str, degraded: bool, error: str | None) -> None:
+            self.last_search = {
+                "mode": "hybrid", "alpha": alpha,
+                "keyword_status": status, "degraded": degraded,
+                "keyword_error": error,
+            }
+
+        if keyword_error is not None:
+            # Degraded: keyword leg lost -> vector-only results, loudly marked.
+            results = self.search(query_vector, top_k=top_k, filter_sql=filter_sql)
+            _meta("failed", True, keyword_error)
+            return results
+
         if alpha <= 0.0:
-            for row in keyword:
-                row["score"] = round(float(row.get("_score", row.get("score", 0))), 4)
-            return keyword[:top_k]
+            # Keyword-only: same normalized-rank contract as the blend.
+            results = []
+            for rank, row in enumerate(keyword[:top_k], 1):
+                raw = 1.0 / (self._RRF_K + rank)
+                row.pop("_score", None)
+                row.pop("vector", None)
+                row["score"] = round(min(1.0, raw * (self._RRF_K + 1)), 4)
+                row["rrf_score"] = round(raw, 8)
+                results.append(row)
+            _meta("index_stale" if index_error else "ok",
+                  bool(index_error), index_error)
+            return results
+
         semantic = self.search(query_vector, top_k=candidate_count, filter_sql=filter_sql)
         fused: dict[str, dict[str, Any]] = {}
         scores: dict[str, float] = {}
-        for weight, rows in ((alpha, semantic), (1 - alpha, keyword)):
+        for leg_name, weight, rows in (("semantic", alpha, semantic),
+                                       ("keyword", 1 - alpha, keyword)):
             for rank, row in enumerate(rows, 1):
                 key = row["id"]
-                fused.setdefault(key, dict(row))
-                scores[key] = scores.get(key, 0.0) + weight / (60 + rank)
+                base = fused.setdefault(key, {k: v for k, v in row.items()
+                                             if k not in ("_score", "vector")})
+                if leg_name == "semantic":
+                    base["similarity"] = row.get("score")
+                scores[key] = scores.get(key, 0.0) + weight / (self._RRF_K + rank)
         ordered = sorted(scores, key=lambda k: (-scores[k], k))[:top_k]
-        return [{**fused[k], "score": round(scores[k], 8)} for k in ordered]
+        results = []
+        for key in ordered:
+            raw = scores[key]
+            normalized = min(1.0, raw * (self._RRF_K + 1))
+            results.append({**fused[key], "score": round(normalized, 4),
+                            "rrf_score": round(raw, 8)})
+        _meta("index_stale" if index_error else "ok",
+              bool(index_error), index_error)
+        return results
 
     # -- public API: delete ------------------------------------------------- #
 

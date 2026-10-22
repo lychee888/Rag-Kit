@@ -44,7 +44,7 @@ def test_caption_failure_preserves_whole_source(tmp_path, monkeypatch, capsys, m
         raise RuntimeError('injected captioning exception')
     monkeypatch.setattr(pipeline, '_run_vlm_captioning', fail)
     if surface == 'cli':
-        response = runner.invoke(cli.app, ['ingest', str(path), '--json'])
+        response = runner.invoke(cli.app, ['ingest', str(path), '--force', '--json'])
         assert response.exit_code == 1
         body = json.loads(response.stdout)
     elif surface == 'watcher':
@@ -55,9 +55,9 @@ def test_caption_failure_preserves_whole_source(tmp_path, monkeypatch, capsys, m
     else:
         from rag_kit import watcher
         monkeypatch.setattr('rag_kit.config.get_config', lambda: cfg)
-        monkeypatch.setattr(watcher, '_load_state', lambda: {str(path): 'old-hash'})
+        monkeypatch.setattr(watcher, '_load_state', lambda folder=None: {str(path): 'old-hash'})
         saved = []
-        monkeypatch.setattr(watcher, '_save_state', lambda value: saved.append(dict(value)))
+        monkeypatch.setattr(watcher, '_save_state', lambda value, folder=None: saved.append(dict(value)))
         cfg.supported_extensions = ['.docx']
         body = watcher.scan_and_ingest(once=True)
         assert saved == [{str(path): 'old-hash'}]

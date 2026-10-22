@@ -224,6 +224,14 @@ rag ingest ~/Documents/rag-ingest
 
 ## Changelog
 
+### v0.1.2 — audit fixes (2026-10-21)
+
+- **Hybrid score contract**: `search_hybrid` scores are normalized into the documented [0, 1] range for every `search_alpha` (keyword-only BM25 magnitudes no longer leak through). The transform is monotonic, so ranking is unchanged; the raw fused value ships as `rrf_score` and the underlying cosine similarity as `similarity` on blended results.
+- **Loud keyword degradation**: when the FTS leg fails or its index cannot be refreshed, `rag query --json` now reports `"degraded": true` plus `"keyword_status"`/`"keyword_error"` (human mode prints a stderr warning). Keyword-only queries raise instead of quietly returning nothing useful. Programmatic consumers must check `degraded`.
+- **Incremental re-index**: chunk ids are now content-derived (sha1 of source, page, index, text) instead of random, so re-ingesting an unchanged document updates rows in place. All ingest surfaces (`rag ingest`, `rag watch`, the poll daemon) consult a per-folder content-hash bucket and skip unchanged files before extraction/embedding; a file is only recorded after a successful store commit, and skips are refused when the store no longer holds that source's rows. `rag ingest --force` re-ingests regardless.
+- **Config hardening**: `~` is expanded centrally at load time for `watch_folder`, `db_path`, and `model_dir`; a non-mapping or malformed YAML config raises an actionable `ValueError`; unknown config keys (YAML and `rag config set`) now warn instead of vanishing.
+- **Watcher isolation**: the poll daemon acquires the same per-folder lock as `rag watch` (a second watcher exits with `already_running` instead of double-ingesting), and watcher state moved from one global file to per-folder buckets under `~/.cache/rag-kit/watcher-state/`, so switching `watch_folder` no longer cross-wipes other folders' rows. Existing global state is adopted once per folder (migration-safe).
+
 ### Unreleased — document lifecycle fixes
 
 - Re-importing a document atomically replaces its previous chunks. Empty documents remove previous content; extraction and embedding failures retain it.

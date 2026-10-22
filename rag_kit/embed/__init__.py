@@ -9,9 +9,9 @@ Well within the 2 GB total memory budget.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +20,19 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 # Chunk dataclass
 # --------------------------------------------------------------------------- #
+
+
+def stable_chunk_id(source: str, page: int, chunk_idx: int, text: str) -> str:
+    """Content-derived chunk id (audit F5).
+
+    Deterministic so re-ingesting an unchanged document produces the same
+    ids: the store's ``merge_insert("id")`` then updates rows in place
+    instead of deleting and reinserting every chunk on every boot.
+    """
+    digest = hashlib.sha1(
+        f"{source}\x00{page}\x00{chunk_idx}\x00{text}".encode("utf-8")
+    ).hexdigest()
+    return digest[:16]
 
 
 @dataclass
@@ -42,7 +55,8 @@ class Chunk:
 
     def __post_init__(self) -> None:
         if not self.chunk_id:
-            self.chunk_id = uuid.uuid4().hex[:16]
+            self.chunk_id = stable_chunk_id(self.source, self.page,
+                                           self.chunk_idx, self.text)
 
     def to_dict(self) -> dict[str, Any]:
         return {

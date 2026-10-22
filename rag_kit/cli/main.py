@@ -23,6 +23,7 @@ from typing import Any, Optional
 import typer
 
 from rag_kit import __version__
+from rag_kit import content_state
 from rag_kit.config import Config, create_default_config, get_config, get_config_path, load_config
 from rag_kit.embed import EmbeddingEngine, create_engine_from_config
 from rag_kit.ingest import SUPPORTED_EXTENSIONS, ingest_file, ingest_folder
@@ -134,6 +135,9 @@ def ingest(
     vlm: Optional[bool] = typer.Option(
         None, "--vlm/--no-vlm", help="Enable/disable VLM for visual content (default: from config)."
     ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-ingest even files whose content hash matches the last successful ingest."
+    ),
 ) -> None:
     """Ingest a file or folder into the vector DB.
 
@@ -141,6 +145,9 @@ def ingest(
 
     For a single file, that file is parsed, chunked, embedded, and stored.
     For a folder, all supported files inside are ingested recursively.
+    Files whose content hash matches the last successful ingest (and whose
+    rows are still present) are skipped unless ``--force`` is given
+    (audit F5: no full-corpus re-embed on every re-run).
     """
     config = _ensure_config()
     if vlm is None:
@@ -152,6 +159,7 @@ def ingest(
     errors = []
     incomplete = False
     added = 0
+    skipped = 0
     if not source.exists():
         files = []
         errors.append({"file": str(source), "error": "Path does not exist"})
@@ -161,7 +169,16 @@ def ingest(
         files = sorted(p for p in source.rglob("*") if p.is_file()
                        and p.suffix.lower() in config.supported_extensions
                        and p.suffix.lower() in SUPPORTED_EXTENSIONS)
+    state = {} if force else content_state.load_bucket(source)
+    initial_state = dict(state)
     for file in files:
+        abs_path = str(file)
+        digest = content_state.file_hash(file)
+        if (not force and digest and state.get(abs_path) == digest
+                and store.has_source(abs_path)):
+            skipped += 1
+            typer.echo(f"Skipping unchanged file: {file}", err=True)
+            continue
         typer.echo(f"Ingesting file: {file}", err=True)
         try:
             chunks = ingest_file(file, chunk_size=config.chunk_size,
@@ -169,19 +186,28 @@ def ingest(
                                  languages=config.languages, use_ocr=ocr, use_vlm=vlm)
             vectors = engine.embed_texts([c["text"] for c in chunks]) if chunks else []
             added += store.replace_source(str(file), chunks, vectors)
+            new_digest = content_state.file_hash(file)
+            if new_digest:
+                state[abs_path] = new_digest
         except Exception as exc:
             from rag_kit.ingest.pipeline import IncompleteExtractionError
             incomplete = incomplete or isinstance(exc, IncompleteExtractionError)
             errors.append({"file": str(file), "error": str(exc)})
+    if source.exists() and state != initial_state:
+        content_state.save_bucket(source, state)
     result = {
         "status": ("partial" if incomplete else "error") if errors else "ok", "path": str(source),
-        "chunks_found": added, "chunks_stored": added, "errors": errors,
+        "chunks_found": added, "chunks_stored": added, "skipped_unchanged": skipped,
+        "errors": errors,
         "elapsed_seconds": round(time.monotonic() - start, 2),
     }
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False))
     else:
-        typer.echo(f"Ingested {added} chunks from {source}")
+        msg = f"Ingested {added} chunks from {source}"
+        if skipped:
+            msg += f" ({skipped} unchanged file(s) skipped)"
+        typer.echo(msg)
         for error in errors:
             typer.echo(f"Error ingesting {error['file']}: {error['error']}", err=True)
     if errors:
@@ -226,6 +252,11 @@ def query_cmd(
     # Use the configured blend even when filtering to one document.
     results = store.search_hybrid(text, query_vec, top_k=top_k,
                                   alpha=float(config.search_alpha), filter_sql=filter_sql)
+    # Audit F3: keyword degradation must be visible to stdout-only consumers.
+    search_meta = getattr(store, "last_search", {}) or {}
+    degraded = bool(search_meta.get("degraded"))
+    keyword_status = str(search_meta.get("keyword_status", "not_run"))
+    keyword_error = search_meta.get("keyword_error")
 
     if json_output:
         output = {
@@ -233,6 +264,8 @@ def query_cmd(
             "query": text,
             "top_k": top_k,
             "result_count": len(results),
+            "degraded": degraded,
+            "keyword_status": keyword_status,
             "results": [
                 {
                     "score": r["score"],
@@ -244,8 +277,13 @@ def query_cmd(
                 for r in results
             ],
         }
+        if degraded and keyword_error:
+            output["keyword_error"] = str(keyword_error)
         typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
     else:
+        if degraded:
+            typer.echo(f"WARNING: keyword leg degraded ({keyword_error or keyword_status}); "
+                       f"results are vector-only.", err=True)
         typer.echo(f"\nQuery: \"{text}\"\n")
         typer.echo(f"{'─' * 70}")
         for i, r in enumerate(results, 1):
@@ -472,6 +510,14 @@ def config_set(
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     typer.echo(f"Set {key} = {typed_val} in {target}")
+    # Audit F6: unknown keys must WARN, not vanish silently.
+    if key not in Config.__dataclass_fields__:
+        typer.echo(
+            f"Warning: '{key}' is not a known rag-kit config key; it will "
+            f"be ignored (with a warning) when the config loads. "
+            f"Valid keys: {', '.join(sorted(Config.__dataclass_fields__))}",
+            err=True,
+        )
     # Warn if value doesn't look right after coercion.
     if key in _LIST_KEYS and isinstance(typed_val, str):
         typer.echo(f"  Note: {key} expects comma-separated list; current value: {typed_val!r}")
@@ -505,6 +551,9 @@ class _WatchHandler:
         self._root = Path(config.watch_folder).expanduser().resolve()
         self._debounce = debounce_seconds
         self._json = json_output
+        # Per-folder content-hash bucket (audit F5): files whose bytes match
+        # the last successful ingest are not re-extracted or re-embedded.
+        self._state = content_state.load_bucket(self._root)
         self._pending_events: dict[str, float] = {}  # path -> last event time
         self._pending_trees: set[str] = set()
         self._pending_deletes: set[str] = set()      # resolved abs paths to remove
@@ -545,15 +594,27 @@ class _WatchHandler:
     def reconcile(self, folder: Path) -> None:
         """Backfill changes missed during downtime without touching other roots."""
         self._root = folder.resolve()
+        self._state = content_state.load_bucket(self._root)
         files = [p for p in folder.rglob("*") if p.is_file()]
         store = create_store_from_config(self._config)
+        dirty = False
         for source in store.list_sources():
             path = Path(source)
             if (path.is_absolute() and path.is_relative_to(folder)
                     and (not path.exists() or path.suffix.lower() not in self._config.supported_extensions)):
                 self._on_event("deleted", source)
+                if self._state.pop(source, None) is not None:
+                    dirty = True
         for file in files:
+            abs_path = str(file.resolve())
+            digest = content_state.file_hash(file)
+            # Content unchanged since the last successful ingest and the
+            # rows are still in the store: skip (audit F5).
+            if digest and digest == self._state.get(abs_path) and store.has_source(abs_path):
+                continue
             self._on_event("created_or_modified", str(file))
+        if dirty:
+            content_state.save_bucket(self._root, self._state)
 
     def _drain_deletes(self) -> None:
         with self._lock:
@@ -600,6 +661,8 @@ class _WatchHandler:
             store = create_store_from_config(self._config)
             deleted = store.delete_by_source(abs_path)
             _CLI_LOGGER.info("Removed %d chunk(s) for %s", deleted, abs_path)
+            if self._state.pop(abs_path, None) is not None:
+                content_state.save_bucket(self._root, self._state)
         except RuntimeError:
             pass  # table doesn't exist yet — nothing to delete
         except Exception as exc:
@@ -613,6 +676,18 @@ class _WatchHandler:
         # Resolve once so the stored ``source`` matches the value used for
         # delete-by-source replacement (and later file-removal deletes).
         abs_path = str(Path(file_path).resolve())
+
+        # Event-driven surfaces also hash-check (audit F5): an event whose
+        # file bytes already match the last successful ingest is a no-op.
+        digest = content_state.file_hash(abs_path)
+        if digest and self._state.get(abs_path) == digest:
+            try:
+                probe = create_store_from_config(self._config)
+                if probe.has_source(abs_path):
+                    _CLI_LOGGER.debug("Unchanged content, skipping: %s", abs_path)
+                    return
+            except RuntimeError:
+                pass
 
         try:
             chunks = ingest_file(
@@ -654,6 +729,12 @@ class _WatchHandler:
             texts = [c["text"] for c in store_chunks]
             vectors = engine.embed_texts(texts) if texts else []
             added = store.replace_source(abs_path, store_chunks, vectors)
+            # Record content hash only after a fully successful store
+            # commit; failures stay eligible for the next event or boot.
+            new_digest = content_state.file_hash(abs_path)
+            if new_digest:
+                self._state[abs_path] = new_digest
+                content_state.save_bucket(self._root, self._state)
             elapsed = time.monotonic() - start
 
             msg = f"Ingested {file_path}: {len(chunks)} chunks ({added} stored) in {elapsed:.1f}s"

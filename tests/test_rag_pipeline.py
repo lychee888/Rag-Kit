@@ -25,6 +25,8 @@ import pytest
 # Ensure project is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from rag_kit import __version__
+
 
 # =============================================================================
 # Helpers
@@ -300,7 +302,7 @@ class TestCLI:
         """rag --version prints version."""
         r = _rag_kit("--version")
         assert r.returncode == 0
-        assert "0.1.1" in r.stdout
+        assert __version__ in r.stdout
 
     def test_setup_autostart_command_exists(self):
         """setup-autostart command has help text."""

@@ -6,12 +6,15 @@ for every key. Validates paths, model names, and the 2 GB memory budget guard.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -46,6 +49,10 @@ _INT_KEYS = {"chunk_size", "chunk_overlap", "watch_interval", "max_memory_mb"}
 _FLOAT_KEYS = {"search_alpha"}
 _LIST_KEYS = {"supported_extensions", "languages"}
 
+# Path-like fields: '~' is expanded centrally at load time (audit F6) so
+# every consumer (store, embed, watchers, autostart) sees an absolute path.
+_PATH_KEYS = {"watch_folder", "db_path", "model_dir"}
+
 
 # ---------------------------------------------------------------------------
 # Config dataclass
@@ -73,8 +80,20 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Config":
-        """Build Config from a dict, applying env var overrides."""
+        """Build Config from a dict, applying env var overrides.
+
+        Hardening (audit F6): unknown keys warn instead of vanishing, and
+        ``~`` is expanded in every path field here so all downstream
+        consumers receive absolute paths.
+        """
         merged = dict(DEFAULT_CONFIG)
+        unknown = sorted(set(data) - set(cls.__dataclass_fields__))
+        if unknown:
+            _logger.warning(
+                "Ignoring unknown config key(s): %s (check for typos; "
+                "valid keys: %s)",
+                ", ".join(unknown), ", ".join(sorted(cls.__dataclass_fields__)),
+            )
         merged.update(data)
         # Apply environment variable overrides.
         for key in merged:
@@ -82,6 +101,11 @@ class Config:
             env_val = os.environ.get(env_key)
             if env_val is not None:
                 merged[key] = _coerce(key, env_val)
+        # Expand '~' centrally in path-like fields (audit F6).
+        for key in _PATH_KEYS:
+            val = merged.get(key)
+            if isinstance(val, str) and val:
+                merged[key] = str(Path(val).expanduser())
         return cls(**{k: merged[k] for k in cls.__dataclass_fields__})
 
     def validate(self) -> list[str]:
@@ -212,8 +236,20 @@ def load_config(config_path: str | Path | None = None) -> Config:
     _CONFIG_PATH = path
 
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                f"Config file {path} is not valid YAML: {exc}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Config file {path} must contain a YAML mapping of "
+                f"'key: value' pairs at the top level; found "
+                f"{type(raw).__name__}. Check for a stray leading '-' "
+                f"(list) or missing keys."
+            )
     else:
         raw = {}
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 import io
 import logging
 import os
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -145,8 +144,9 @@ def ingest_file(
                 vc["page"] = int(vc.get("page", 0)) + 1
                 vc["chunk_idx"] = len(all_chunks)
                 if "id" not in vc:
-                    import uuid
-                    vc["id"] = uuid.uuid4().hex[:16]
+                    from rag_kit.embed import stable_chunk_id
+                    vc["id"] = stable_chunk_id(str(path), vc["page"],
+                                               vc["chunk_idx"], vc.get("text", ""))
                 all_chunks.append(vc)
         except Exception as exc:
             raise IncompleteExtractionError(

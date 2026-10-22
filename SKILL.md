@@ -61,6 +61,8 @@ Returns:
   "query": "your search query",
   "top_k": 5,
   "result_count": 3,
+  "degraded": false,
+  "keyword_status": "ok",
   "results": [
     {
       "score": 0.8521,
@@ -72,6 +74,18 @@ Returns:
   ]
 }
 ```
+
+Score contract: `score` is always in [0, 1]. With `search_alpha: 1` (or a
+degraded fallback) it is cosine similarity (1 = identical); with hybrid
+blending (`alpha < 1`) it is a normalized rank-fusion confidence where
+1.0 means the chunk ranked first in every active leg. Never threshold
+hybrid scores against cosine-similarity cutoffs.
+
+`degraded`/`keyword_status` (also on stderr in human mode): when the FTS
+keyword leg fails or its index could not be refreshed, hybrid search
+falls back to vector-only results and reports `"degraded": true` with
+`"keyword_status": "failed"` (`keyword_error` carries the reason). Treat
+degraded results as reduced search capability, not a healthy response.
 
 If the database is empty, it returns `{"status": "empty", "message": "...", "results": []}`.
 

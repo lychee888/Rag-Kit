@@ -56,7 +56,7 @@ def test_render_failure_preserves_whole_snapshot(setup, tmp_path, monkeypatch, c
     assert any(r['vlm_generated'] for r in before)
     monkeypatch.setattr(fitz.Page, 'get_pixmap', lambda *a, **kw: (_ for _ in ()).throw(MemoryError('render failed')))
     if surface == 'cli':
-        response = runner.invoke(cli.app, ['ingest', str(path), '--json'])
+        response = runner.invoke(cli.app, ['ingest', str(path), '--force', '--json'])
         assert response.exit_code == 1
         body = json.loads(response.stdout)
     elif surface == 'watcher':
@@ -66,9 +66,9 @@ def test_render_failure_preserves_whole_snapshot(setup, tmp_path, monkeypatch, c
     else:
         from rag_kit import watcher
         monkeypatch.setattr('rag_kit.config.get_config', lambda: setup)
-        monkeypatch.setattr(watcher, '_load_state', lambda: {str(path): 'old-hash'})
+        monkeypatch.setattr(watcher, '_load_state', lambda folder=None: {str(path): 'old-hash'})
         saved = []
-        monkeypatch.setattr(watcher, '_save_state', lambda value: saved.append(dict(value)))
+        monkeypatch.setattr(watcher, '_save_state', lambda value, folder=None: saved.append(dict(value)))
         setup.supported_extensions = ['.pdf']
         body = watcher.scan_and_ingest(once=True)
         assert saved == [{str(path): 'old-hash'}]
@@ -106,7 +106,7 @@ def test_partial_embedded_image_fallback_does_not_replace_source(setup, tmp_path
         return original(doc, xref)
     monkeypatch.setattr(fitz.Page, 'get_pixmap', lambda *a, **kw: (_ for _ in ()).throw(MemoryError('render failed')))
     monkeypatch.setattr(fitz.Document, 'extract_image', extract)
-    result = runner.invoke(cli.app, ['ingest', str(path), '--json'])
+    result = runner.invoke(cli.app, ['ingest', str(path), '--force', '--json'])
     assert result.exit_code == 1
     assert json.loads(result.stdout)['status'] == 'partial'
     assert store._get_table().to_arrow().to_pylist() == before
@@ -175,7 +175,7 @@ def test_docx_image_read_failure_is_reported(setup, tmp_path, monkeypatch):
     def fail(part):
         raise MemoryError('image read failed')
     monkeypatch.setattr(ImagePart, 'blob', property(fail))
-    result = runner.invoke(cli.app, ['ingest', str(path), '--json'])
+    result = runner.invoke(cli.app, ['ingest', str(path), '--force', '--json'])
     assert result.exit_code == 1
     assert json.loads(result.stdout)['status'] == 'partial'
     assert store._get_table().to_arrow().to_pylist() == before
@@ -200,7 +200,7 @@ def test_inline_image_cannot_be_hidden_by_successful_xobject_fallback(setup, tmp
     store = VectorStore(setup.db_path)
     before = store._get_table().to_arrow().to_pylist()
     monkeypatch.setattr(fitz.Page, 'get_pixmap', lambda *a, **kw: (_ for _ in ()).throw(MemoryError('render failed')))
-    result = runner.invoke(cli.app, ['ingest', str(path), '--json'])
+    result = runner.invoke(cli.app, ['ingest', str(path), '--force', '--json'])
     assert result.exit_code == 1
     assert json.loads(result.stdout)['status'] == 'partial'
     assert store._get_table().to_arrow().to_pylist() == before
@@ -251,7 +251,7 @@ def test_masked_chart_cannot_be_replaced_by_base_image(setup, tmp_path, monkeypa
     store = VectorStore(setup.db_path)
     before = store._get_table().to_arrow().to_pylist()
     monkeypatch.setattr(fitz.Page, 'get_pixmap', lambda *a, **kw: (_ for _ in ()).throw(MemoryError('render failed')))
-    result = runner.invoke(cli.app, ['ingest', str(path), '--json'])
+    result = runner.invoke(cli.app, ['ingest', str(path), '--force', '--json'])
     assert result.exit_code == 1
     assert json.loads(result.stdout)['status'] == 'partial'
     assert store._get_table().to_arrow().to_pylist() == before
