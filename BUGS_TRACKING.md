@@ -113,3 +113,4 @@ about GPU, CUDA version, Python version, or inherited shell environment.
 - [ ] CPU path still works (`CUDA_VISIBLE_DEVICES=-1`).
 - [ ] Linux (WSL) install completes; non-interactive exit 0; no sudo hang; ingest+query OK.
 - [ ] `download-models` scripts don't die on non-interactive input.
+- [x] Watcher survives silent death: Windows autostart generator now emits Startup-vbs + self-healing restart loop (commit b1f4b3b), after the one-shot ONLOGON task died silently overnight 2026-10-21/22.
