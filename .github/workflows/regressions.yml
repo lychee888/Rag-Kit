@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: python -m pip install -e '.[dev]' 'lancedb==${{ matrix.lancedb }}'
       - name: Cache real multilingual embedding model
         run: python -c "from huggingface_hub import snapshot_download; from pathlib import Path; snapshot_download('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir=str(Path.home() / 'models'), ignore_patterns=['onnx/*', 'openvino/*', '*.h5', '*.ot'])"
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: python -m pip install -e '.[dev]' 'lancedb==0.34.0'
       - name: Cache real SmolVLM weights
         run: python -c "from huggingface_hub import snapshot_download; from pathlib import Path; snapshot_download('HuggingFaceTB/SmolVLM-256M-Instruct', cache_dir=str(Path.home() / 'models'), ignore_patterns=['*.h5', '*.ot', 'onnx/*', 'openvino/*'])"

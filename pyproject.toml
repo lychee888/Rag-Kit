@@ -33,6 +33,10 @@ dependencies = [
     "sentence-transformers>=3.0",
     "lancedb>=0.34",
     "transformers>=4.54,<6",
+    # torchvision is required by the SmolVLM/Idefics3 image processor on the
+    # default PyTorch VLM path (found by the F8 vlm-integration CI lane: base
+    # installs without the ocr extra otherwise cannot caption at all).
+    "torchvision>=0.19",
     "tokenizers>=0.22.0,<0.23.1",
     "pillow>=10.0",
     "openpyxl>=3.1",
