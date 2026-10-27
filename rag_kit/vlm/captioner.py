@@ -29,14 +29,37 @@ from rag_kit.vlm.language import detect_language, get_vlm_prompt
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
+def _cache_complete(directory: Path) -> bool:
+    """True if *directory* holds a locally loadable model snapshot.
+
+    A snapshot counts only when it has config.json *and* at least one weight
+    set (safetensors, sharded index, PyTorch bin, or ONNX). Audit F8: this is
+    the single completeness rule shared by the loader's path resolution and
+    ``VLMCaptioner.is_available()``, so detection can never disagree with the
+    location that actually gets loaded.
+    """
+    if not (directory / "config.json").is_file():
+        return False
+    if any((directory / n).is_file() for n in ("model.safetensors", "pytorch_model.bin")):
+        return True
+    if any(directory.glob("*.safetensors")):
+        return True
+    if (directory / "model.safetensors.index.json").is_file():
+        return True
+    onnx_dir = directory / "onnx"
+    return onnx_dir.is_dir() and any(onnx_dir.glob("*.onnx"))
+
+
+@lru_cache(maxsize=4)
 def _resolve_model_path(model_name: str, cache_dir: str) -> str | None:
     """Resolve the local model directory path.
 
-    Checks several possible cache locations:
+    Checks several possible cache locations (all governed by
+    ``_cache_complete`` — config.json + weights must both be present):
     1. cache_dir/model_name (flat directory)
-    2. cache_dir/models--org--name/ (HuggingFace hub cache)
+    2. cache_dir/models--org--name/snapshots/xxx/ (HuggingFace hub cache)
     3. ~/lancedb-models/org/name (prior rag-kit cache)
+    4. ~/.cache/huggingface/hub/models--org--name/snapshots/xxx/
 
     Returns the local path if found, None to use remote download.
     """
@@ -44,7 +67,7 @@ def _resolve_model_path(model_name: str, cache_dir: str) -> str | None:
 
     # 1. Flat directory: cache_dir/org/name
     flat = Path(cache_dir) / model_name
-    if flat.exists() and (flat / "config.json").exists():
+    if _cache_complete(flat):
         return str(flat)
 
     # 2. HuggingFace hub cache: cache_dir/models--org--name/snapshots/xxx/
@@ -54,13 +77,13 @@ def _resolve_model_path(model_name: str, cache_dir: str) -> str | None:
         snapshots = hub_cache / "snapshots"
         if snapshots.exists():
             for snapshot in snapshots.iterdir():
-                if (snapshot / "config.json").exists():
+                if _cache_complete(snapshot):
                     return str(snapshot)
 
     # 3. Prior rag-kit cache: ~/lancedb-models/org/name
     home = Path.home()
     alt = home / "lancedb-models" / org / name
-    if alt.exists() and (alt / "config.json").exists():
+    if _cache_complete(alt):
         return str(alt)
 
     # 4. HuggingFace default cache: ~/.cache/huggingface/hub/models--org--name/
@@ -69,7 +92,7 @@ def _resolve_model_path(model_name: str, cache_dir: str) -> str | None:
         snapshots = hf_cache / "snapshots"
         if snapshots.exists():
             for snapshot in snapshots.iterdir():
-                if (snapshot / "config.json").exists():
+                if _cache_complete(snapshot):
                     return str(snapshot)
 
     return None
@@ -431,10 +454,13 @@ class VLMCaptioner:
         return chunks
 
     def is_available(self) -> bool:
-        """Check if the VLM model can be loaded (without actually loading it).
+        """Check if the VLM model can be loaded locally (without downloading).
 
-        Returns True if either PyTorch or ONNX backend is available
-        and the model files exist in the cache directory.
+        Audit F8: delegates to ``_resolve_model_path`` — the exact resolution
+        the loader itself uses — so availability can never disagree with the
+        location that would actually be loaded. Returns True only when the
+        transformers/PIL imports succeed *and* a complete snapshot (config +
+        weights) is present in one of the supported cache locations.
         """
         try:
             import transformers  # noqa: F401
@@ -442,26 +468,7 @@ class VLMCaptioner:
         except ImportError:
             return False
 
-        # Check if model directory exists
-        from pathlib import Path
-        model_path = Path(self.cache_dir) / self.model_name
-        if model_path.exists():
-            return True
-
-        # Check HuggingFace cache structure
-        # Models are cached as: cache_dir/models--<org>--<name>/
-        org, _, name = self.model_name.partition("/")
-        hf_cache = Path(self.cache_dir) / f"models--{org}--{name}"
-        if hf_cache.exists():
-            return True
-
-        # Also check lancedb-models cache (from prior rag-kit installation)
-        home = Path.home()
-        alt_cache = home / "lancedb-models" / org / name
-        if alt_cache.exists():
-            return True
-
-        return False
+        return _resolve_model_path(self.model_name, str(self.cache_dir)) is not None
 
 
 def caption_document(

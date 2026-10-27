@@ -3,7 +3,10 @@
 Tests cover:
 - Language detection (zh vs en)
 - Image extraction from PDFs (vector graphics + raster images)
-- VLM captioning (requires SmolVLM model — skipped if not available)
+- Cache detection consistency (audit F8: is_available agrees with loader)
+- Real-VLM captioning: opt-in integration lane (marker `vlm_integration` or
+  RAG_KIT_VLM_INTEGRATION=1); RAG_KIT_VLM_REQUIRED=1 turns a missing
+  prerequisite into a loud failure instead of a skip
 - Chunk metadata (vlm_generated, source_type)
 """
 
@@ -16,6 +19,50 @@ import pytest
 # Ensure the project root is on the path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+VLM_MODEL = "HuggingFaceTB/SmolVLM-256M-Instruct"
+
+
+def _vlm_cache_dir() -> str:
+    """Model cache dir honored by the lane (mirrors rag-kit defaults)."""
+    return os.environ.get("RAG_KIT_MODEL_DIR", str(Path.home() / "models"))
+
+
+def _vlm_caption_prereq(request) -> str:
+    """Gate for the opt-in real-captioning lane; honors REQUIRED mode.
+
+    Returns the cache dir when the lane may run. Skips when the lane was not
+    opted into or (non-required mode) the model is absent; FAILS (not skips)
+    when RAG_KIT_VLM_REQUIRED=1 and prerequisites are missing. Called from
+    the test body so a missing prereq surfaces as a FAILED test, not an
+    ERROR from fixture setup.
+    """
+    markexpr = getattr(request.config.option, "markexpr", "") or ""
+    opted_in = (
+        os.environ.get("RAG_KIT_VLM_INTEGRATION") == "1"
+        or "vlm_integration" in markexpr
+    )
+    if not opted_in:
+        pytest.skip(
+            "real-VLM integration lane is opt-in: run with "
+            "`-m vlm_integration` or RAG_KIT_VLM_INTEGRATION=1"
+        )
+
+    from rag_kit.vlm import VLMCaptioner
+
+    cache_dir = _vlm_cache_dir()
+    captioner = VLMCaptioner(model_name=VLM_MODEL, cache_dir=cache_dir)
+    if not captioner.is_available():
+        detail = (
+            f"SmolVLM weights not found under cache dir {cache_dir!r} "
+            f"(expected models--HuggingFaceTB--SmolVLM-256M-Instruct/"
+            f"snapshots/*/model.safetensors); pass RAG_KIT_MODEL_DIR to "
+            f"point at a populated cache"
+        )
+        if os.environ.get("RAG_KIT_VLM_REQUIRED") == "1":
+            pytest.fail(f"REQUIRED real-VLM integration lane: {detail}")
+        pytest.skip(detail)
+    return cache_dir
 
 
 class TestLanguageDetection:
@@ -129,7 +176,17 @@ class TestImageExtraction:
 
 
 class TestVLMCaptioning:
-    """Tests for VLM captioning (require SmolVLM model)."""
+    """Real-captioning integration lane (requires the SmolVLM model).
+
+    Opt-in two ways (either enables the lane):
+      - ``pytest -m vlm_integration``
+      - ``RAG_KIT_VLM_INTEGRATION=1 pytest``
+
+    With ``RAG_KIT_VLM_REQUIRED=1`` a missing prerequisite FAILS loudly
+    instead of skipping, so broken visual ingestion can never hide behind
+    permanent skips again (audit F8). The default suite stays light: with
+    no opt-in the lane skips deterministically.
+    """
 
     @pytest.fixture
     def test_pdf(self):
@@ -140,30 +197,47 @@ class TestVLMCaptioning:
         return str(pdf_path)
 
     def test_captioner_availability(self):
-        """VLMCaptioner.is_available() should detect cached model."""
+        """is_available() must agree with where the loader actually looks."""
         from rag_kit.vlm import VLMCaptioner
+        from rag_kit.vlm.captioner import _resolve_model_path
 
-        captioner = VLMCaptioner(
-            model_name="HuggingFaceTB/SmolVLM-256M-Instruct",
-            cache_dir=os.environ.get("RAG_KIT_MODEL_DIR", str(Path.home() / "models")),
-        )
-        # May or may not be available depending on environment
-        # Just verify it doesn't crash
+        captioner = VLMCaptioner(model_name=VLM_MODEL, cache_dir=_vlm_cache_dir())
         result = captioner.is_available()
         assert isinstance(result, bool)
+        # F8: detection and load-path resolution are the same computation.
+        assert result == (
+            _resolve_model_path(VLM_MODEL, str(captioner.cache_dir)) is not None
+        )
 
-    @pytest.mark.skipif(
-        not Path.home().joinpath("lancedb-models/HuggingFaceTB/SmolVLM-256M-Instruct/model.safetensors").exists(),
-        reason="SmolVLM model not cached",
-    )
-    def test_caption_document(self, test_pdf):
+    def test_captioner_unavailable_on_empty_cache(self, tmp_path):
+        """An empty cache dir must report unavailable to BOTH detector and
+        resolver, and a config.json-only snapshot (no weights) must not
+        count as available (audit F8: no half-populated cache false-positives).
+        """
+        from rag_kit.vlm import VLMCaptioner
+        from rag_kit.vlm.captioner import _resolve_model_path
+
+        empty = tmp_path / "models-empty"
+        captioner = VLMCaptioner(model_name=VLM_MODEL, cache_dir=str(empty))
+        assert captioner.is_available() is False
+        assert _resolve_model_path(VLM_MODEL, str(empty)) is None
+
+        # Snapshot dir with config.json but no weights -> still unavailable.
+        snap = empty / f"models--HuggingFaceTB--SmolVLM-256M-Instruct" / "snapshots" / "deadbeef"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text("{}", encoding="utf-8")
+        assert captioner.is_available() is False
+        assert _resolve_model_path(VLM_MODEL, str(empty)) is None
+
+    @pytest.mark.vlm_integration
+    def test_caption_document(self, test_pdf, request):
         """Full pipeline: extract + caption all visuals from test PDF."""
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
         from rag_kit.vlm import caption_document
 
-        chunks = caption_document(test_pdf)
+        chunks = caption_document(test_pdf, cache_dir=_vlm_caption_prereq(request))
 
         assert len(chunks) >= 2, f"Expected ≥2 VLM chunks, got {len(chunks)}"
 
@@ -175,18 +249,15 @@ class TestVLMCaptioning:
             assert "page" in chunk and chunk["page"] >= 0, "Chunk must have page number"
             assert "[Visual content" in chunk["text"], "Text should be formatted as visual content"
 
-    @pytest.mark.skipif(
-        not Path.home().joinpath("lancedb-models/HuggingFaceTB/SmolVLM-256M-Instruct/model.safetensors").exists(),
-        reason="SmolVLM model not cached",
-    )
-    def test_caption_coherence(self, test_pdf):
+    @pytest.mark.vlm_integration
+    def test_caption_coherence(self, test_pdf, request):
         """VLM captions should be coherent (contain relevant keywords)."""
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
         from rag_kit.vlm import caption_document
 
-        chunks = caption_document(test_pdf)
+        chunks = caption_document(test_pdf, cache_dir=_vlm_caption_prereq(request))
         assert len(chunks) >= 2
 
         # Page 1 (bar chart) caption should mention chart/revenue/bar

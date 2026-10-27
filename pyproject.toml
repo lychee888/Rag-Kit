@@ -60,3 +60,6 @@ exclude = ["tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "vlm_integration: real SmolVLM captioning lane (opt-in: `-m vlm_integration` or RAG_KIT_VLM_INTEGRATION=1; RAG_KIT_VLM_REQUIRED=1 fails instead of skipping when prereqs are missing)",
+]

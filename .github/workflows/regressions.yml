@@ -48,3 +48,28 @@ jobs:
           TRANSFORMERS_OFFLINE: '1'
           PYTHONUTF8: '1'
         run: python -m pytest -q -rA -k 'not autostart and not TestWatcher'
+
+  vlm-integration:
+    # Audit F8: real-captioning lane. Downloads SmolVLM weights, then runs the
+    # vlm_integration tests in REQUIRED mode: a missing/pruned cache FAILS
+    # this lane loudly instead of skipping forever, so broken visual
+    # ingestion can never hide behind permanent skips.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e '.[dev]' 'lancedb==0.34.0'
+      - name: Cache real SmolVLM weights
+        run: python -c "from huggingface_hub import snapshot_download; from pathlib import Path; snapshot_download('HuggingFaceTB/SmolVLM-256M-Instruct', cache_dir=str(Path.home() / 'models'), ignore_patterns=['*.h5', '*.ot', 'onnx/*', 'openvino/*'])"
+      - name: Real-VLM captioning from cached weights (required mode)
+        env:
+          RAG_KIT_VLM_REQUIRED: '1'
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          PYTHONUTF8: '1'
+        run: python -m pytest tests/test_vlm.py -m vlm_integration -q -rA
