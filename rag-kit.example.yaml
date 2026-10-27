@@ -14,7 +14,7 @@ model_dir: ~/models
 embedding_model: paraphrase-multilingual-MiniLM-L12-v2
 
 # HuggingFace model name for VLM (vision-language model).
-vlm_model: SmolVLM-256M-Instruct
+vlm_model: HuggingFaceTB/SmolVLM-256M-Instruct
 
 # Enable/disable VLM captioning for image-heavy documents.
 vlm_enabled: true

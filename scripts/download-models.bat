@@ -45,7 +45,7 @@ echo.
 echo Models to download:
 echo   1. paraphrase-multilingual-MiniLM-L12-v2 (embedding, ~470 MB)
 echo   2. EasyOCR ch_sim + en (OCR, ~100 MB download)
-echo   3. SmolVLM-256M-Instruct (VLM, ~500 MB) - optional
+echo   3. HuggingFaceTB/SmolVLM-256M-Instruct (VLM, ~500 MB) - optional
 echo.
 REM Only prompt if the caller didn't already specify (e.g. via installer).
 if not defined SKIP_VLM (

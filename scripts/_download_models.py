@@ -143,7 +143,7 @@ else:
 # 3. SmolVLM (optional)
 skip_vlm = os.environ.get("SKIP_VLM", "0")
 if skip_vlm != "1":
-    print("\n[3/3] VLM model: SmolVLM-256M-Instruct")
+    print("\n[3/3] VLM model: HuggingFaceTB/SmolVLM-256M-Instruct")
     vlm_dir = Path(model_dir) / "models--HuggingFaceTB--SmolVLM-256M-Instruct" / "snapshots" / "manual"
     if (vlm_dir / "model.safetensors").exists():
         print("  already present")

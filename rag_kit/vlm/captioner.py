@@ -1,10 +1,10 @@
 """VLM (Vision-Language Model) captioner for visual content extraction.
 
-Uses SmolVLM-256M-Instruct (or configurable model) to generate text
+Uses HuggingFaceTB/SmolVLM-256M-Instruct (or configurable model) to generate text
 descriptions of images found in documents. These descriptions are then
 fed back into the chunking + embedding pipeline as additional chunks.
 
-Model budget: SmolVLM-256M-Instruct is ~250-500 MB (fits within 2 GB
+Model budget: HuggingFaceTB/SmolVLM-256M-Instruct is ~250-500 MB (fits within 2 GB
 combined budget alongside embedding model + OCR engine).
 
 Key design:

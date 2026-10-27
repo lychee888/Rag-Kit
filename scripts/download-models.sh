@@ -195,7 +195,7 @@ echo ""
 echo "Models to download:"
 echo "  1. paraphrase-multilingual-MiniLM-L12-v2 (embedding, ~470 MB)"
 echo "  2. EasyOCR ch_sim + en (OCR, ~100 MB download)"
-echo "  3. SmolVLM-256M-Instruct (VLM, ~500 MB) - optional"
+echo "  3. HuggingFaceTB/SmolVLM-256M-Instruct (VLM, ~500 MB) - optional"
 echo ""
 
 DOWNLOAD_VLM=""
@@ -274,7 +274,7 @@ except Exception as e:
 
 # 3. SmolVLM (optional)
 if skip_vlm != 1:
-    print("\n[3/3] Downloading VLM model: SmolVLM-256M-Instruct")
+    print("\n[3/3] Downloading VLM model: HuggingFaceTB/SmolVLM-256M-Instruct")
     print("  (~500 MB, for chart/diagram captioning)")
     try:
         from huggingface_hub import snapshot_download

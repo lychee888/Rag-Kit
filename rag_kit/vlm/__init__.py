@@ -2,7 +2,7 @@
 
 When the ingestion pipeline encounters images, charts, diagrams, or tables
 embedded in PDFs/DOCX files, this module extracts those visual regions and
-passes them to a lightweight VLM (SmolVLM-256M-Instruct) to generate
+passes them to a lightweight VLM (HuggingFaceTB/SmolVLM-256M-Instruct) to generate
 textual descriptions. These descriptions are then fed back into the
 chunking + embedding pipeline as additional chunks with metadata flagging
 them as vlm_generated=True and source_type="image".

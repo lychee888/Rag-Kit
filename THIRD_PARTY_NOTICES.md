@@ -18,7 +18,7 @@ The weights are bundled unmodified.
 - **License**: Apache-2.0
 - **Asset**: `embedding-model.tar.gz` → unpacked to `~/models/`
 
-## Vision-language model — `SmolVLM-256M-Instruct`
+## Vision-language model — `HuggingFaceTB/SmolVLM-256M-Instruct`
 
 - **Author / copyright**: Hugging Face Inc. (Hugging Face TB), based on **SmolLM2**
 - **Source**: https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct
