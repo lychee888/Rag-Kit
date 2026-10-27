@@ -241,7 +241,7 @@ rag ingest ~/Documents/rag-ingest
 - Watcher ownership uses an OS file lock, released when the process exits. Lock files remain on disk and are safe to reuse.
 - Existing indexes gain missing metadata columns without dropping documents. Changing embedding dimensions requires a separate database.
 - Long-lived database readers see commits from other processes, including watcher updates; queries tolerate a first ingestion that is still creating its table.
-- `search_alpha` weights reciprocal-rank fusion and retains zero for keyword-only search, including source-filtered queries. LanceDB 0.25+ is required for native full-text indexing.
+- `search_alpha` weights reciprocal-rank fusion and retains zero for keyword-only search, including source-filtered queries. LanceDB 0.34+ is required (native full-text indexing, `list_tables` API).
 - Cached sentence-transformers snapshots load directly, including short model names in the standard namespaced Hub cache.
 
 New imports replace sources stored under the same absolute path. Older releases may have left relative paths or basename-only visual chunks; review `rag list-files --json` and remove those obsolete source entries explicitly after re-importing. Basename-only entries cannot be safely assigned to a document when several files share a name.

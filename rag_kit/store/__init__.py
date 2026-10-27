@@ -109,7 +109,7 @@ class VectorStore:
         """
         db = self._connect()
 
-        if self.table_name in db.table_names():
+        if self.table_name in db.list_tables().tables:
             existing = db.open_table(self.table_name)
             existing_cols = set(existing.schema.names)
             defaults = {"vlm_generated": "false", "source_type": "'text'"}
@@ -131,7 +131,7 @@ class VectorStore:
     def _get_table(self) -> Any:
         """Return the table, raising a clear error if it doesn't exist."""
         db = self._connect()
-        if self.table_name not in db.table_names():
+        if self.table_name not in db.list_tables().tables:
             raise RuntimeError(
                 f"Table '{self.table_name}' does not exist in {self.db_path}. "
                 f"Add chunks first via add_chunks()."
@@ -478,7 +478,7 @@ class VectorStore:
     def clear(self) -> None:
         """Delete all data in the table."""
         db = self._connect()
-        if self.table_name in db.table_names():
+        if self.table_name in db.list_tables().tables:
             db.drop_table(self.table_name)
         self._table = None
 

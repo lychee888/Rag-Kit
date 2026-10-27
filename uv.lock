@@ -2206,7 +2206,7 @@ vlm = [
 [package.metadata]
 requires-dist = [
     { name = "easyocr", marker = "extra == 'ocr'", specifier = ">=1.7" },
-    { name = "lancedb", specifier = ">=0.25" },
+    { name = "lancedb", specifier = ">=0.34" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "optimum", extras = ["onnxruntime"], marker = "extra == 'vlm'", specifier = ">=1.20" },
     { name = "pillow", specifier = ">=10.0" },
